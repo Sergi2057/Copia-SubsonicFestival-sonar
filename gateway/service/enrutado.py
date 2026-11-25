@@ -60,7 +60,10 @@ async def reenviar(cliente: httpx.AsyncClient, request: Request, ruta: str,
     try:
         respuesta = await cliente.send(peticion, stream=True)
     except httpx.TimeoutException:
-        log.warning("%s no respondió a tiempo: %s %s", servicio, request.method, url)
+        # La URL incluye la ruta que envía el cliente: se quitan los saltos de línea para que no pueda inyectar
+        # líneas falsas en el log
+        url_log = url.replace("\r", "").replace("\n", "")
+        log.warning("%s no respondió a tiempo: %s %s", servicio, request.method, url_log)
         raise ErrorApi(504, "TIEMPO_AGOTADO", f"{servicio} no ha respondido a tiempo", {"servicio": servicio})
     except httpx.TransportError as e:
         log.warning("%s no disponible: %s", servicio, e)
