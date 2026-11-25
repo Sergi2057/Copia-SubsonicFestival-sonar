@@ -1,0 +1,8 @@
+.env
+.env.*
+!.env.example
+firebase-claves.json
+*firebase*.json
+secrets/
+*.db
+.pytest_cache/

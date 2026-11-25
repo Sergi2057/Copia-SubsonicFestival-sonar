@@ -1,0 +1,317 @@
+/* src/analitica/analitica.css — Dueña: Paula
+   Estilos de las pantallas de analítica. Todas las clases empiezan por "an-" para no chocar con nadie.
+   El color de acento es el del panel en el que se pinta (admin, proveedor o cliente). */
+
+.an-pantalla {
+  --an-acento: var(--color-admin, var(--color-proveedor, var(--color-cliente, var(--rojo, #bc0850))));
+  --an-fondo: var(--gris, #111111);
+  --an-borde: rgba(255, 255, 255, 0.1);
+  --an-apagado: #9a9a9a;
+  --an-alerta: #f59e0b;
+  --an-bien: #22c55e;
+  --an-mal: #ef4444;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  color: var(--texto, #e5e5e5);
+  font-family: 'DM Sans', sans-serif;
+}
+
+.an-pantalla h3 {
+  margin: 0 0 12px;
+  font-size: 18px;
+  color: #ffffff;
+}
+
+.an-subtitulo {
+  margin: 0;
+  color: var(--an-apagado);
+  font-size: 14px;
+}
+
+/* Cada apartado de Estadísticas: filtros arriba y contenido debajo */
+.an-apartado {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* ---------- Filtros ---------- */
+.an-filtros {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-end;
+}
+
+.an-campo {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--an-apagado);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+
+.an-campo select,
+.an-campo input {
+  min-width: 180px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--an-borde);
+  background: #1a1a1a;
+  color: #ffffff;
+  font: inherit;
+  font-size: 14px;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.an-pestanas {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.an-pestanas button {
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--an-borde);
+  background: transparent;
+  color: var(--texto, #e5e5e5);
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+}
+
+.an-pestanas button[aria-pressed='true'] {
+  background: var(--an-acento);
+  border-color: var(--an-acento);
+  color: #ffffff;
+}
+
+/* ---------- Tarjetas de indicadores ---------- */
+.an-indicadores {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 16px;
+}
+
+.an-tarjeta {
+  background: var(--an-fondo);
+  border: 1px solid var(--an-borde);
+  border-radius: 12px;
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.an-tarjeta-titulo {
+  font-size: 12px;
+  color: var(--an-apagado);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+}
+
+.an-tarjeta-numero {
+  font-family: 'Bebas Neue', sans-serif;
+  font-size: 38px;
+  line-height: 1;
+  color: #ffffff;
+  overflow-wrap: anywhere;
+}
+
+.an-tarjeta-detalle {
+  font-size: 13px;
+  color: var(--an-apagado);
+}
+
+/* ---------- Tablas ---------- */
+.an-tabla-contenedor {
+  overflow-x: auto;
+  border: 1px solid var(--an-borde);
+  border-radius: 12px;
+}
+
+.an-tabla {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--an-fondo);
+  font-size: 14px;
+}
+
+.an-tabla th,
+.an-tabla td {
+  padding: 10px 14px;
+  text-align: left;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  white-space: nowrap;
+}
+
+.an-tabla th {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--an-apagado);
+  font-weight: 600;
+}
+
+.an-tabla td.an-num,
+.an-tabla th.an-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.an-tabla td.an-ancho {
+  width: 40%;
+  min-width: 120px;
+}
+
+.an-tabla tfoot td {
+  font-weight: 700;
+  border-bottom: none;
+  color: #ffffff;
+}
+
+/* ---------- Barra de porcentaje ---------- */
+.an-barra {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  min-width: 60px;
+}
+
+.an-barra span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--an-acento);
+}
+
+.an-barra span.an-barra-alerta {
+  background: var(--an-alerta);
+}
+
+/* ---------- Listas de recomendaciones ---------- */
+.an-lista {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 14px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.an-item {
+  background: var(--an-fondo);
+  border: 1px solid var(--an-borde);
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.an-item a {
+  color: #ffffff;
+  font-weight: 700;
+  font-size: 16px;
+  text-decoration: none;
+}
+
+.an-item a:hover,
+.an-item a:focus-visible {
+  color: var(--an-acento);
+  text-decoration: underline;
+}
+
+.an-motivo {
+  font-size: 13px;
+  color: var(--an-apagado);
+}
+
+.an-dato {
+  font-size: 13px;
+  color: var(--texto, #e5e5e5);
+}
+
+.an-sube { color: var(--an-bien); }
+.an-baja { color: var(--an-mal); }
+
+/* ---------- Mi escaleta ---------- */
+.an-escaleta-dia {
+  margin: 16px 0 8px;
+  font-size: 14px;
+  color: var(--an-apagado);
+}
+
+.an-escaleta-dia::first-letter {
+  text-transform: uppercase;
+}
+
+.an-solapa td {
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.an-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: rgba(245, 158, 11, 0.18);
+  color: var(--an-alerta);
+  white-space: normal;
+}
+
+/* ---------- Afluencia ---------- */
+.an-escenarios {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 16px;
+}
+
+/* ---------- Avisos ---------- */
+.an-aviso {
+  margin: 0;
+  padding: 16px;
+  border-radius: 12px;
+  border: 1px dashed var(--an-borde);
+  color: var(--an-apagado);
+}
+
+.an-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  background: rgba(239, 68, 68, 0.08);
+  color: #fca5a5;
+}
+
+/* Portada: usa el padding y el h2 grande de las secciones de la web (main.css); solo se acerca el subtítulo */
+.an-inicio h2 {
+  margin-bottom: 8px;
+}
+
+@media (max-width: 600px) {
+  .an-campo select,
+  .an-campo input {
+    min-width: 0;
+    width: 100%;
+  }
+  .an-filtros > * {
+    flex: 1 1 100%;
+  }
+  .an-escenarios {
+    grid-template-columns: 1fr;
+  }
+}

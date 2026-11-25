@@ -1,0 +1,1502 @@
+openapi: 3.0.3
+info:
+  title: Subsonic Festival - ms-espacios
+  version: 1.0.0
+  description: |
+    Microservicio **Espacios** de la arquitectura de Subsonic Festival (Grupo GA02).
+    La visión global de la arquitectura está en la Memoria de la Práctica 1 (Practica1_Memoria_ASEE_GA02.pdf).
+
+    ## Responsabilidades
+    - **Eventos**: ediciones del festival (título, país, fechas, recinto, etiquetas, estado).
+    - **Recintos**: lugares donde se celebran los eventos.
+    - **Tipos de espacio** y **espacios** de cada recinto: escenarios, puestos de comida y bebida, merchandising, acampada, VIP y servicios.
+    - **Alquileres** de espacios a proveedores.
+    - **Tarifas de acceso** (Day, Weekend, VIP) y **aforo**, incluidas las reservas temporales de aforo durante la compra de una entrada.
+
+    ## Actores
+    | Actor | Qué hace en este servicio |
+    |---|---|
+    | Visitante / cliente | Consulta eventos, recintos, espacios y tarifas. |
+    | Proveedor | Busca espacios disponibles, solicita alquileres y consulta su historial. |
+    | Administrador | Gestiona eventos, recintos, espacios y tarifas; aprueba o rechaza alquileres. |
+    | ms-usuarios (interno) | Reserva y libera aforo al vender entradas. |
+
+    ## Reglas de negocio
+    - Un espacio no puede tener dos alquileres **aprobados** que se solapen en fechas.
+    - Solo pueden solicitar alquileres los proveedores **activos**. Se comprueba en una réplica local de proveedores que se actualiza con los eventos `usuarios.proveedor.*`, para no depender de que ms-usuarios esté disponible.
+    - **Reserva de aforo**: al comprar una entrada, ms-usuarios reserva una plaza. La operación bloquea la fila de la tarifa (`SELECT … FOR UPDATE`) y comprueba el cupo, así que no puede haber sobreventa. La reserva caduca a los **10 minutos** si no se confirma; se confirma al recibir `usuarios.entrada.comprada` y se libera si el pago falla.
+    - Las rutas `/internal/v1/...` solo son accesibles desde la red interna (no las expone el API Gateway) y se autentican con un token de servicio.
+
+    ## Almacenamiento
+    **PostgreSQL** (`espacios_db`). Los alquileres y las reservas de aforo necesitan transacciones ACID y bloqueo de fila para evitar dobles reservas y sobreventa. Las listas variables (servicios, etiquetas) se guardan en columnas JSONB.
+
+    **recintos**: lugares físicos
+
+    | Campo | Tipo | Descripción |
+    |---|---|---|
+    | id | UUID (PK) | Identificador del recinto. |
+    | nombre | VARCHAR(255) | P. ej. «Dreamville Grounds». |
+    | direccion / ciudad / pais | VARCHAR | Ubicación postal. |
+    | latitud / longitud | NUMERIC(9,6) | Coordenadas para el mapa del front-end. |
+    | aforo_maximo | INTEGER | Aforo legal del recinto. |
+
+    **eventos**: ediciones del festival
+
+    | Campo | Tipo | Descripción |
+    |---|---|---|
+    | id | VARCHAR(100) (PK) | Identificador legible, p. ej. `evento-belgium`. |
+    | titulo | VARCHAR(200) | P. ej. «Subsonic Belgium». |
+    | recinto_id | UUID (FK recintos) | Lugar de celebración. |
+    | fecha_inicio / fecha_fin | DATE | Fechas del evento (sustituyen al texto «18 – 27 Julio 2026» de la versión actual). |
+    | descripcion / imagen_url | TEXT / VARCHAR | Información para el front-end. |
+    | tags | JSONB | Etiquetas de búsqueda: ["techno", "house", "verano"]. |
+    | servicios_generales | JSONB | Servicios del evento: acampada, servicio médico 24 h, lanzaderas… |
+    | estado | VARCHAR(20) | BORRADOR, PUBLICADO, FINALIZADO o CANCELADO. |
+
+    **tipos_espacio**: catálogo de tipos
+
+    | Campo | Tipo | Descripción |
+    |---|---|---|
+    | codigo | VARCHAR(30) (PK) | ESCENARIO, FOOD_BEVERAGE, MERCHANDISING, ACAMPADA, VIP, SERVICIOS. |
+    | nombre | VARCHAR(100) | Nombre para mostrar. |
+    | alquilable | BOOLEAN | Si puede alquilarse a proveedores (los escenarios no). |
+
+    **espacios**: áreas concretas de un recinto para un evento
+
+    | Campo | Tipo | Descripción |
+    |---|---|---|
+    | id | VARCHAR(50) (PK) | Identificador legible, p. ej. `espacio-001`. |
+    | evento_id | VARCHAR(100) (FK eventos) | Evento al que pertenece. |
+    | tipo | VARCHAR(30) (FK tipos_espacio) | Tipo de espacio. |
+    | nombre / zona | VARCHAR | P. ej. «Main Stage» / «Zona A – Entrada principal». |
+    | tamano / dimensiones | VARCHAR | P. ej. «Grande» / «10x10 m». |
+    | aforo | INTEGER | Aforo del espacio (relevante en escenarios). |
+    | precio_alquiler | NUMERIC(10,2) | Precio para proveedores (nulo si no es alquilable). |
+    | servicios | JSONB | ["electricidad", "agua", "mostrador"]. |
+    | disponible | BOOLEAN | Si admite nuevas solicitudes de alquiler. |
+
+    **alquileres**: alquiler de un espacio por un proveedor
+
+    | Campo | Tipo | Descripción |
+    |---|---|---|
+    | id | UUID (PK) | Identificador del alquiler. |
+    | espacio_id | VARCHAR(50) (FK espacios) | Espacio alquilado. |
+    | proveedor_id | VARCHAR(128) | Identificador del proveedor en ms-usuarios (sin FK entre bases de datos). |
+    | fecha_inicio / fecha_fin | TIMESTAMPTZ | Periodo del alquiler (no puede solaparse con otro alquiler aprobado del mismo espacio). |
+    | importe | NUMERIC(10,2) | Importe calculado. |
+    | estado | VARCHAR(20) | PENDIENTE, APROBADO, RECHAZADO, CANCELADO, ACTIVO o FINALIZADO. |
+    | comentarios | TEXT | Observaciones del proveedor o del administrador. |
+
+    **tarifas_acceso y reservas_aforo**: precios de las entradas y control de aforo
+
+    | Campo | Tipo | Descripción |
+    |---|---|---|
+    | tarifas_acceso.id | UUID (PK) | Identificador de la tarifa. |
+    | tarifas_acceso.evento_id | VARCHAR(100) (FK) | Evento. |
+    | tarifas_acceso.tipo_pase | VARCHAR(20) | DAY, WEEKEND o VIP. |
+    | tarifas_acceso.precio | NUMERIC(8,2) | Precio (p. ej. 89 € Day / 199 € Weekend en Bélgica). |
+    | tarifas_acceso.cupo_total / cupo_vendido | INTEGER | Entradas totales y vendidas. |
+    | reservas_aforo.id | UUID (PK) | Reserva temporal durante una compra. |
+    | reservas_aforo.tarifa_id / usuario_id | UUID / VARCHAR | Qué se reserva y para quién. |
+    | reservas_aforo.estado / expira_en | VARCHAR / TIMESTAMPTZ | PENDIENTE, CONFIRMADA o LIBERADA; caduca a los 10 minutos. |
+
+    **proveedores**: réplica de solo lectura de los proveedores (propietario: ms-usuarios)
+
+    | Campo | Tipo | Descripción |
+    |---|---|---|
+    | proveedor_id | VARCHAR(128) (PK) | Identificador del usuario proveedor. |
+    | nombre_comercial / tipo_servicio | VARCHAR | Datos que se muestran al administrador junto a cada alquiler. |
+    | activo | BOOLEAN | Un proveedor desactivado no puede solicitar alquileres. |
+
+    **Origen en la versión monolítica actual**: La tabla `festivales` pasa a `eventos` (`precios` → `tarifas_acceso`; `fechas` en texto → dos columnas DATE). `espacios` y `alquileres` se mantienen; `proveedor_id` pasa a ser el UID de Firebase en lugar del email.
+
+    ## Estados de un evento
+    ```text
+    BORRADOR --> PUBLICADO --> FINALIZADO
+        |            |
+        +------------+--> CANCELADO
+    ```
+
+    ## Estados de un alquiler
+    ```text
+    PENDIENTE --(admin)--> APROBADO --(fecha inicio)--> ACTIVO --(proveedor)--> FINALIZADO
+        |   \
+        |    +--(admin)--> RECHAZADO
+        +--(proveedor)--> CANCELADO
+    ```
+
+    ## Eventos que publica
+    | Evento | Lo consumen |
+    |---|---|
+    | `espacios.evento.publicado` / `actualizado` | ms-escaleta, ms-tienda (punto de recogida), ms-analitica |
+    | `espacios.evento.cancelado` | ms-usuarios (reembolsos y avisos), ms-escaleta, ms-analitica |
+    | `espacios.espacio.creado` / `actualizado` / `eliminado` | ms-escaleta (réplica de escenarios), ms-analitica |
+    | `espacios.alquiler.solicitado` | ms-usuarios (avisa a los administradores), ms-analitica |
+    | `espacios.alquiler.aprobado` / `rechazado` / `finalizado` | ms-usuarios (avisa al proveedor), ms-analitica |
+    | `espacios.aforo.agotado` | ms-usuarios, ms-analitica |
+
+    ## Eventos que consume
+    | Evento | Reacción |
+    |---|---|
+    | `usuarios.entrada.comprada` | Confirma la reserva de aforo (`cupo_vendido + 1`). |
+    | `usuarios.entrada.cancelada` | Libera una plaza. |
+    | `usuarios.proveedor.actualizado` / `desactivado` | Actualiza la réplica de proveedores; si se desactiva, rechaza sus alquileres pendientes. |
+    | `usuarios.usuario.eliminado` | Anonimiza los alquileres del proveedor (RGPD). |
+
+    ## Flujo: alquiler de un espacio
+    ```text
+        Proveedor         Admin          Gateway       ms-espacios       Broker        ms-usuarios
+            |               |               |               |               |               |
+            | 1. GET /espacios?...          |               |               |               |
+            |------------------------------>|               |               |               |
+            |               |               | 2. reenvía    |               |               |
+            |               |               |-------------->|               |               |
+            | 3. 200 espacios libres        |               |               |               |
+            |<----------------------------------------------|               |               |
+            | 4. POST alquileres            |               |               |               |
+            |------------------------------>|               |               |               |
+            |               |               | 5. rol = proveedor            |               |
+            |               |               |-------------->|               |               |
+            |               |               |               | 6. proveedor activo y sin solapes
+            |               |               |               | 7. alquiler.solicitado        |
+            |               |               |               |~~~~~~~~~~~~~~>|               |
+            |               |               |               |               | 8. avisa a admins
+            |               |               |               |               |~~~~~~~~~~~~~~>|
+            |               | 9. PATCH APROBADO             |               |               |
+            |               |-------------->|               |               |               |
+            |               |               | 10. rol = admin               |               |
+            |               |               |-------------->|               |               |
+            |               |               |               | 11. alquiler.aprobado         |
+            |               |               |               |~~~~~~~~~~~~~~>|               |
+            |               |               |               |               | 12. push + email
+            |               |               |               |               |~~~~~~~~~~~~~~>|
+            |               |               |               |               |               |
+    ```
+
+    ## Flujo: reserva de aforo (lado de ms-espacios en la compra de una entrada)
+    ```text
+       ms-usuarios     ms-espacios       Broker
+            |               |               |
+            | 1. POST reservas-aforo        |
+            |-------------->|               |
+            |               | 2. bloquea tarifa, comprueba cupo
+            | 3. 201 reserva (10 min)       |
+            |<--------------|               |
+            |               | 4. entrada.comprada
+            |               |<~~~~~~~~~~~~~~|
+            |               | 5. confirma: cupo_vendido + 1
+            |               |               |
+    ```
+    Si el pago falla, ms-usuarios llama a `DELETE /internal/v1/reservas-aforo/{reserva_id}`;
+    si no llega a llamar, la reserva caduca sola.
+
+    `---` llamada síncrona (HTTP) · `~~~` mensaje asíncrono (evento)
+  contact:
+    name: Grupo GA02 - ASEE, Universidad de Extremadura
+servers:
+  - url: https://api.subsonicfestival.com/api/v1
+    description: Producción (a través del API Gateway)
+  - url: http://localhost:8000/api/v1
+    description: Desarrollo local
+tags:
+  - name: Eventos
+    description: Ediciones del festival
+  - name: Tarifas
+    description: Tipos de entrada, precios y cupos
+  - name: Recintos
+    description: Lugares donde se celebran los eventos
+  - name: Espacios
+    description: Escenarios, puestos y zonas de cada recinto
+  - name: Alquileres
+    description: Alquiler de espacios a proveedores
+  - name: Interno
+    description: Operaciones solo accesibles desde la red interna
+security:
+  - bearerAuth: []
+
+paths:
+  /eventos:
+    get:
+      tags: [Eventos]
+      summary: Buscar eventos
+      description: Calendario de eventos. Los visitantes solo ven eventos PUBLICADOS o FINALIZADOS. **Público.**
+      operationId: buscarEventos
+      security: []
+      parameters:
+        - name: pais
+          in: query
+          schema:
+            type: string
+            example: Bélgica
+        - name: tag
+          in: query
+          description: Etiqueta de búsqueda (género, temporada…)
+          schema:
+            type: string
+            example: techno
+        - name: desde
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: hasta
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: estado
+          in: query
+          schema:
+            $ref: '#/components/schemas/EstadoEvento'
+        - $ref: '#/components/parameters/Limite'
+        - $ref: '#/components/parameters/Desplazamiento'
+      responses:
+        '200':
+          description: Eventos encontrados
+          headers:
+            X-Total-Count:
+              $ref: '#/components/headers/XTotalCount'
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Evento'
+    post:
+      tags: [Eventos]
+      summary: Crear un evento
+      description: Se crea en estado BORRADOR. **Rol:** admin.
+      operationId: crearEvento
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventoEntrada'
+      responses:
+        '201':
+          description: Evento creado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Evento'
+        '400':
+          $ref: '#/components/responses/PeticionNoValida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '409':
+          description: Ya existe un evento con ese identificador
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /eventos/{evento_id}:
+    parameters:
+      - $ref: '#/components/parameters/EventoId'
+    get:
+      tags: [Eventos]
+      summary: Obtener un evento
+      description: Incluye el recinto y los servicios generales. **Público.**
+      operationId: obtenerEvento
+      security: []
+      responses:
+        '200':
+          description: Evento
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventoDetalle'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    put:
+      tags: [Eventos]
+      summary: Modificar un evento
+      description: Publica `espacios.evento.actualizado`. **Rol:** admin.
+      operationId: modificarEvento
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventoEntrada'
+      responses:
+        '200':
+          description: Evento modificado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Evento'
+        '400':
+          $ref: '#/components/responses/PeticionNoValida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    patch:
+      tags: [Eventos]
+      summary: Cambiar el estado de un evento (publicar, cancelar, finalizar)
+      description: |
+        Publica `espacios.evento.publicado` o `espacios.evento.cancelado` según el nuevo
+        estado. Al cancelar, ms-usuarios marca las entradas para reembolso. **Rol:** admin.
+      operationId: cambiarEstadoEvento
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [estado]
+              properties:
+                estado:
+                  $ref: '#/components/schemas/EstadoEvento'
+                motivo:
+                  type: string
+                  description: Obligatorio al cancelar
+                  example: Alerta meteorológica por tormentas en la zona
+      responses:
+        '200':
+          description: Estado cambiado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Evento'
+        '400':
+          $ref: '#/components/responses/PeticionNoValida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          description: Transición de estado no permitida (p. ej. de FINALIZADO a PUBLICADO)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags: [Eventos]
+      summary: Eliminar un evento
+      description: Solo eventos en BORRADOR sin entradas vendidas. **Rol:** admin.
+      operationId: eliminarEvento
+      responses:
+        '204':
+          description: Evento eliminado
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          description: El evento no está en BORRADOR o ya tiene entradas vendidas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /eventos/{evento_id}/tarifas:
+    parameters:
+      - $ref: '#/components/parameters/EventoId'
+    get:
+      tags: [Tarifas]
+      summary: Tipos de entrada, precios y disponibilidad
+      description: '**Público.**'
+      operationId: listarTarifas
+      security: []
+      responses:
+        '200':
+          description: Tarifas del evento
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Tarifa'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    post:
+      tags: [Tarifas]
+      summary: Crear una tarifa
+      description: '**Rol:** admin.'
+      operationId: crearTarifa
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TarifaEntrada'
+      responses:
+        '201':
+          description: Tarifa creada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tarifa'
+        '400':
+          $ref: '#/components/responses/PeticionNoValida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '409':
+          description: Ya existe una tarifa de ese tipo en el evento
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /eventos/{evento_id}/tarifas/{tarifa_id}:
+    parameters:
+      - $ref: '#/components/parameters/EventoId'
+      - $ref: '#/components/parameters/TarifaId'
+    put:
+      tags: [Tarifas]
+      summary: Modificar precio o cupo de una tarifa
+      description: El cupo total no puede ser menor que las entradas ya vendidas. **Rol:** admin.
+      operationId: modificarTarifa
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TarifaEntrada'
+      responses:
+        '200':
+          description: Tarifa modificada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tarifa'
+        '400':
+          $ref: '#/components/responses/PeticionNoValida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    delete:
+      tags: [Tarifas]
+      summary: Eliminar una tarifa sin ventas
+      description: '**Rol:** admin.'
+      operationId: eliminarTarifa
+      responses:
+        '204':
+          description: Tarifa eliminada
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          description: La tarifa ya tiene entradas vendidas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /recintos:
+    get:
+      tags: [Recintos]
+      summary: Listar recintos
+      description: '**Público.**'
+      operationId: listarRecintos
+      security: []
+      responses:
+        '200':
+          description: Recintos
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Recinto'
+    post:
+      tags: [Recintos]
+      summary: Crear un recinto
+      description: '**Rol:** admin.'
+      operationId: crearRecinto
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecintoEntrada'
+      responses:
+        '201':
+          description: Recinto creado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Recinto'
+        '400':
+          $ref: '#/components/responses/PeticionNoValida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+
+  /recintos/{recinto_id}:
+    parameters:
+      - name: recinto_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [Recintos]
+      summary: Obtener un recinto
+      description: '**Público.**'
+      operationId: obtenerRecinto
+      security: []
+      responses:
+        '200':
+          description: Recinto
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Recinto'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    put:
+      tags: [Recintos]
+      summary: Modificar un recinto
+      description: '**Rol:** admin.'
+      operationId: modificarRecinto
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecintoEntrada'
+      responses:
+        '200':
+          description: Recinto modificado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Recinto'
+        '400':
+          $ref: '#/components/responses/PeticionNoValida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    delete:
+      tags: [Recintos]
+      summary: Eliminar un recinto
+      description: Solo si ningún evento se celebra en él. **Rol:** admin.
+      operationId: eliminarRecinto
+      responses:
+        '204':
+          description: Recinto eliminado
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          description: Hay eventos que se celebran en el recinto
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /tipos-espacio:
+    get:
+      tags: [Espacios]
+      summary: Catálogo de tipos de espacio
+      description: '**Público.**'
+      operationId: listarTiposEspacio
+      security: []
+      responses:
+        '200':
+          description: Tipos de espacio
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TipoEspacio'
+
+  /espacios:
+    get:
+      tags: [Espacios]
+      summary: Buscar espacios
+      description: '**Público.**'
+      operationId: buscarEspacios
+      security: []
+      parameters:
+        - name: evento_id
+          in: query
+          schema:
+            type: string
+            example: evento-belgium
+        - name: tipo
+          in: query
+          schema:
+            $ref: '#/components/schemas/CodigoTipoEspacio'
+        - name: disponible
+          in: query
+          schema:
+            type: boolean
+        - $ref: '#/components/parameters/Limite'
+        - $ref: '#/components/parameters/Desplazamiento'
+      responses:
+        '200':
+          description: Espacios encontrados
+          headers:
+            X-Total-Count:
+              $ref: '#/components/headers/XTotalCount'
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Espacio'
+    post:
+      tags: [Espacios]
+      summary: Crear un espacio
+      description: Publica `espacios.espacio.creado`. **Rol:** admin.
+      operationId: crearEspacio
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EspacioEntrada'
+      responses:
+        '201':
+          description: Espacio creado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Espacio'
+        '400':
+          $ref: '#/components/responses/PeticionNoValida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+
+  /espacios/{espacio_id}:
+    parameters:
+      - $ref: '#/components/parameters/EspacioId'
+    get:
+      tags: [Espacios]
+      summary: Obtener un espacio
+      description: '**Público.**'
+      operationId: obtenerEspacio
+      security: []
+      responses:
+        '200':
+          description: Espacio
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Espacio'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    put:
+      tags: [Espacios]
+      summary: Modificar un espacio
+      description: Publica `espacios.espacio.actualizado`. **Rol:** admin.
+      operationId: modificarEspacio
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EspacioEntrada'
+      responses:
+        '200':
+          description: Espacio modificado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Espacio'
+        '400':
+          $ref: '#/components/responses/PeticionNoValida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    delete:
+      tags: [Espacios]
+      summary: Eliminar un espacio
+      description: Solo si no tiene alquileres aprobados o activos. **Rol:** admin.
+      operationId: eliminarEspacio
+      responses:
+        '204':
+          description: Espacio eliminado
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          description: El espacio tiene alquileres aprobados o activos
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /espacios/{espacio_id}/alquileres:
+    parameters:
+      - $ref: '#/components/parameters/EspacioId'
+    post:
+      tags: [Alquileres]
+      summary: Solicitar el alquiler de un espacio
+      description: |
+        Crea la solicitud en estado PENDIENTE y publica `espacios.alquiler.solicitado`.
+        El proveedor debe estar activo (se comprueba en la réplica local de proveedores).
+        **Rol:** proveedor.
+      operationId: solicitarAlquiler
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlquilerEntrada'
+      responses:
+        '201':
+          description: Solicitud creada
+          headers:
+            Location:
+              description: URL del alquiler creado
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Alquiler'
+        '400':
+          $ref: '#/components/responses/PeticionNoValida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          description: El usuario no es proveedor o su cuenta está desactivada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          description: El espacio no está disponible o ya tiene un alquiler aprobado en esas fechas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /alquileres:
+    get:
+      tags: [Alquileres]
+      summary: Listar alquileres
+      description: |
+        Un **proveedor** solo recibe sus propios alquileres (activos e historial).
+        Un **admin** recibe todos y puede filtrar. **Rol:** proveedor o admin.
+      operationId: listarAlquileres
+      parameters:
+        - name: estado
+          in: query
+          schema:
+            $ref: '#/components/schemas/EstadoAlquiler'
+        - name: evento_id
+          in: query
+          schema:
+            type: string
+        - name: proveedor_id
+          in: query
+          description: Solo para admin
+          schema:
+            type: string
+        - $ref: '#/components/parameters/Limite'
+        - $ref: '#/components/parameters/Desplazamiento'
+      responses:
+        '200':
+          description: Alquileres
+          headers:
+            X-Total-Count:
+              $ref: '#/components/headers/XTotalCount'
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Alquiler'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+
+  /alquileres/{alquiler_id}:
+    parameters:
+      - name: alquiler_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [Alquileres]
+      summary: Obtener un alquiler
+      description: '**Rol:** el proveedor del alquiler o admin.'
+      operationId: obtenerAlquiler
+      responses:
+        '200':
+          description: Alquiler
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Alquiler'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    patch:
+      tags: [Alquileres]
+      summary: Cambiar el estado de un alquiler
+      description: |
+        - **admin**: PENDIENTE → APROBADO o RECHAZADO.
+        - **proveedor**: PENDIENTE → CANCELADO, o ACTIVO → FINALIZADO.
+
+        Publica `espacios.alquiler.aprobado`, `rechazado` o `finalizado`.
+      operationId: cambiarEstadoAlquiler
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [estado]
+              properties:
+                estado:
+                  $ref: '#/components/schemas/EstadoAlquiler'
+                comentarios:
+                  description: Observaciones del administrador o del proveedor sobre el cambio de estado.
+                  type: string
+                  example: Instalación a partir del 16/07
+            example:
+              estado: APROBADO
+              comentarios: Instalación a partir del 16/07
+      responses:
+        '200':
+          description: Alquiler actualizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Alquiler'
+        '400':
+          $ref: '#/components/responses/PeticionNoValida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          description: Transición de estado no permitida para este rol
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /internal/v1/eventos/{evento_id}/reservas-aforo:
+    servers:
+      - url: http://ms-espacios:8000
+        description: Red interna (no expuesto por el API Gateway)
+    parameters:
+      - $ref: '#/components/parameters/EventoId'
+    post:
+      tags: [Interno]
+      summary: Reservar aforo temporalmente
+      description: |
+        La usa ms-usuarios al iniciar la compra de una entrada. Bloquea la fila de la
+        tarifa, comprueba que queda cupo y crea una reserva que caduca a los 10 minutos.
+        Se confirma al recibir el evento `usuarios.entrada.comprada`.
+      operationId: reservarAforo
+      security:
+        - servicioInterno: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tipo_pase, usuario_id]
+              properties:
+                tipo_pase:
+                  $ref: '#/components/schemas/TipoPase'
+                usuario_id:
+                  description: Cliente que compra la entrada (UID de Firebase).
+                  type: string
+                  example: uid-cliente-david
+      responses:
+        '201':
+          description: Reserva creada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReservaAforo'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          description: No queda cupo para ese tipo de entrada o el evento no está a la venta
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /internal/v1/reservas-aforo/{reserva_id}:
+    servers:
+      - url: http://ms-espacios:8000
+        description: Red interna (no expuesto por el API Gateway)
+    parameters:
+      - name: reserva_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    delete:
+      tags: [Interno]
+      summary: Liberar una reserva de aforo
+      description: La usa ms-usuarios si el pago falla. Si no se llama, la reserva caduca sola.
+      operationId: liberarReservaAforo
+      security:
+        - servicioInterno: []
+      responses:
+        '204':
+          description: Reserva liberada
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          description: La reserva ya estaba confirmada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Token de Firebase Authentication. El rol va en el custom claim `rol`.
+    servicioInterno:
+      type: apiKey
+      in: header
+      name: X-Service-Token
+      description: Token compartido entre servicios de la red interna
+
+  parameters:
+    EventoId:
+      name: evento_id
+      in: path
+      required: true
+      schema:
+        type: string
+        example: evento-belgium
+    EspacioId:
+      name: espacio_id
+      in: path
+      required: true
+      schema:
+        type: string
+        example: espacio-001
+    TarifaId:
+      name: tarifa_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    Limite:
+      name: limite
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    Desplazamiento:
+      name: desplazamiento
+      in: query
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+
+  headers:
+    XTotalCount:
+      description: Número total de resultados sin paginar
+      schema:
+        type: integer
+
+  responses:
+    PeticionNoValida:
+      description: Datos de entrada no válidos
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NoAutenticado:
+      description: Falta el token o no es válido
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    SinPermiso:
+      description: El rol del usuario no permite esta operación
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NoEncontrado:
+      description: El recurso no existe
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    Error:
+      type: object
+      required: [codigo, mensaje]
+      properties:
+        codigo:
+          description: Código del error, estable y en mayúsculas, para que el cliente lo trate sin leer el mensaje.
+          type: string
+          example: SIN_CUPO
+        mensaje:
+          description: Explicación del error para mostrar al usuario.
+          type: string
+          example: No quedan entradas Weekend Pass para este evento
+        detalles:
+          description: Información adicional, por ejemplo el cupo que queda.
+          type: object
+          additionalProperties: true
+          example: {tipo_pase: WEEKEND, disponibles: 0}
+        correlation_id:
+          description: Identificador de la petición, el mismo en los logs de todos los servicios que intervienen.
+          type: string
+          format: uuid
+          example: 9b2f6c1e-3d4a-4b5c-8d7e-1f2a3b4c5d6e
+
+    EstadoEvento:
+      description: Estado de una edición del festival. Las transiciones están en la descripción del servicio.
+      type: string
+      enum: [BORRADOR, PUBLICADO, FINALIZADO, CANCELADO]
+
+    Evento:
+      type: object
+      required: [id, titulo, recinto_id, fecha_inicio, fecha_fin, estado]
+      properties:
+        id:
+          description: Identificador legible del evento.
+          type: string
+          example: evento-belgium
+        titulo:
+          description: Nombre de la edición.
+          type: string
+          example: Subsonic Belgium
+        pais:
+          description: País donde se celebra.
+          type: string
+          example: Bélgica
+        recinto_id:
+          description: Recinto donde se celebra.
+          type: string
+          format: uuid
+          example: 6a1f2b3c-4d5e-4f60-8a7b-9c0d1e2f3a4b
+        fecha_inicio:
+          description: Primer día del evento.
+          type: string
+          format: date
+          example: '2026-07-18'
+        fecha_fin:
+          description: Último día del evento.
+          type: string
+          format: date
+          example: '2026-07-27'
+        descripcion:
+          description: Texto de presentación del evento.
+          type: string
+          example: Diez días de música electrónica en el bosque de Boom.
+        imagen_url:
+          description: Ruta o URL del cartel del evento.
+          type: string
+          example: /subsonic_belgica.jpg
+        tags:
+          description: Etiquetas para buscar y filtrar eventos.
+          type: array
+          items:
+            type: string
+          example: [techno, house, trance, verano]
+        servicios_generales:
+          description: Servicios del recinto que se anuncian a los asistentes.
+          type: array
+          items:
+            type: string
+          example: [Zona de acampada premium, Servicio médico 24h]
+        estado:
+          $ref: '#/components/schemas/EstadoEvento'
+
+    EventoDetalle:
+      description: Evento con los datos completos de su recinto.
+      allOf:
+        - $ref: '#/components/schemas/Evento'
+        - type: object
+          properties:
+            recinto:
+              $ref: '#/components/schemas/Recinto'
+
+    EventoEntrada:
+      type: object
+      required: [id, titulo, pais, recinto_id, fecha_inicio, fecha_fin]
+      properties:
+        id:
+          description: "Identificador legible: evento- seguido de minúsculas, números y guiones. No se puede cambiar después."
+          type: string
+          pattern: '^evento-[a-z0-9-]+$'
+          example: evento-belgium
+        titulo:
+          description: Nombre de la edición.
+          type: string
+          example: Subsonic Belgium
+        pais:
+          description: País donde se celebra.
+          type: string
+          example: Bélgica
+        recinto_id:
+          description: Recinto donde se celebra.
+          type: string
+          format: uuid
+          example: 6a1f2b3c-4d5e-4f60-8a7b-9c0d1e2f3a4b
+        fecha_inicio:
+          description: Primer día del evento.
+          type: string
+          format: date
+          example: "2026-07-18"
+        fecha_fin:
+          description: Último día del evento; no puede ser anterior a fecha_inicio.
+          type: string
+          format: date
+          example: "2026-07-27"
+        descripcion:
+          description: Texto de presentación del evento.
+          type: string
+          example: Diez días de música electrónica en el bosque de Boom.
+        imagen_url:
+          description: Ruta o URL del cartel del evento.
+          type: string
+          example: /subsonic_belgica.jpg
+        tags:
+          description: Etiquetas para buscar y filtrar eventos.
+          type: array
+          items:
+            type: string
+          example: [techno, house, trance, verano]
+        servicios_generales:
+          description: Servicios del recinto que se anuncian a los asistentes.
+          type: array
+          items:
+            type: string
+          example: [Zona de acampada premium, Servicio médico 24h]
+
+    TipoPase:
+      description: "Tipo de pase: un día (DAY), fin de semana completo (WEEKEND) o VIP."
+      type: string
+      enum: [DAY, WEEKEND, VIP]
+
+    Tarifa:
+      type: object
+      properties:
+        id:
+          description: Identificador de la tarifa.
+          type: string
+          format: uuid
+          example: 0c9d8e7f-6a5b-4c3d-8e2f-1a0b9c8d7e6f
+        evento_id:
+          description: Evento al que pertenece la tarifa.
+          type: string
+          example: evento-belgium
+        tipo_pase:
+          $ref: '#/components/schemas/TipoPase'
+        precio:
+          description: Precio de la entrada en euros.
+          type: number
+          format: float
+          example: 199
+        cupo_total:
+          description: Entradas que se ponen a la venta con este tipo de pase.
+          type: integer
+          example: 20000
+        disponibles:
+          type: integer
+          description: cupo_total - vendidas - reservas pendientes
+          example: 4312
+
+    TarifaEntrada:
+      type: object
+      required: [tipo_pase, precio, cupo_total]
+      properties:
+        tipo_pase:
+          $ref: '#/components/schemas/TipoPase'
+        precio:
+          description: Precio de la entrada en euros.
+          type: number
+          format: float
+          minimum: 0
+          example: 199
+        cupo_total:
+          description: Entradas que se ponen a la venta; no puede ser menor que las ya vendidas.
+          type: integer
+          minimum: 0
+          example: 20000
+
+    Recinto:
+      description: Lugar donde se celebran los eventos.
+      allOf:
+        - type: object
+          properties:
+            id:
+              description: Identificador del recinto.
+              type: string
+              format: uuid
+              example: 6a1f2b3c-4d5e-4f60-8a7b-9c0d1e2f3a4b
+        - $ref: '#/components/schemas/RecintoEntrada'
+
+    RecintoEntrada:
+      type: object
+      required: [nombre, ciudad, pais, aforo_maximo]
+      properties:
+        nombre:
+          description: Nombre del recinto.
+          type: string
+          example: Dreamville Grounds
+        direccion:
+          description: Dirección postal del recinto.
+          type: string
+          example: De Schorre, Schommelei 1, 2850 Boom
+        ciudad:
+          description: Ciudad.
+          type: string
+          example: Boom
+        pais:
+          description: País.
+          type: string
+          example: Bélgica
+        latitud:
+          description: Latitud en grados decimales, para el mapa.
+          type: number
+          example: 51.0911
+        longitud:
+          description: Longitud en grados decimales, para el mapa.
+          type: number
+          example: 4.3707
+        aforo_maximo:
+          description: Número máximo de personas que admite el recinto.
+          type: integer
+          example: 70000
+
+    CodigoTipoEspacio:
+      description: Tipo de espacio dentro del recinto. Los escenarios no se alquilan a proveedores.
+      type: string
+      enum: [ESCENARIO, FOOD_BEVERAGE, MERCHANDISING, ACAMPADA, VIP, SERVICIOS]
+
+    TipoEspacio:
+      type: object
+      properties:
+        codigo:
+          $ref: '#/components/schemas/CodigoTipoEspacio'
+        nombre:
+          description: Nombre del tipo para mostrar.
+          type: string
+          example: Food & Beverage
+        alquilable:
+          description: Si los espacios de este tipo se pueden alquilar a proveedores.
+          type: boolean
+          example: true
+
+    Espacio:
+      description: "Zona de un evento: escenario, puesto de comida, tienda, acampada, zona VIP o servicios."
+      allOf:
+        - type: object
+          properties:
+            id:
+              description: Identificador legible del espacio.
+              type: string
+              example: espacio-001
+        - $ref: '#/components/schemas/EspacioEntrada'
+
+    EspacioEntrada:
+      type: object
+      required: [evento_id, tipo, nombre, disponible]
+      properties:
+        evento_id:
+          description: Evento al que pertenece el espacio.
+          type: string
+          example: evento-belgium
+        tipo:
+          $ref: '#/components/schemas/CodigoTipoEspacio'
+        nombre:
+          description: Nombre del espacio.
+          type: string
+          example: Puesto F&B entrada
+        zona:
+          description: Zona del recinto donde está, para orientarse en el mapa.
+          type: string
+          example: Zona A - Entrada Principal
+        tamano:
+          description: Tamaño orientativo del espacio.
+          type: string
+          example: Grande
+        dimensiones:
+          description: Medidas del espacio.
+          type: string
+          example: 10x10m
+        aforo:
+          description: Capacidad máxima de personas; null si no aplica (por ejemplo, un puesto).
+          type: integer
+          nullable: true
+          example: 25000
+        precio_alquiler:
+          description: Precio del alquiler en euros para proveedores; null si no es alquilable.
+          type: number
+          format: float
+          nullable: true
+          example: 1500
+        servicios:
+          description: Instalaciones con las que cuenta el espacio.
+          type: array
+          items:
+            type: string
+          example: [electricidad, agua, mostrador]
+        descripcion:
+          description: Descripción del espacio para los proveedores.
+          type: string
+          example: Puesto junto a la entrada principal, con toma trifásica.
+        disponible:
+          description: Si el espacio está disponible para alquilar o usar.
+          type: boolean
+          example: true
+
+    EstadoAlquiler:
+      description: Estado de una solicitud de alquiler. Las transiciones están en la descripción del servicio.
+      type: string
+      enum: [PENDIENTE, APROBADO, RECHAZADO, CANCELADO, ACTIVO, FINALIZADO]
+
+    AlquilerEntrada:
+      type: object
+      required: [fecha_inicio, fecha_fin]
+      properties:
+        fecha_inicio:
+          description: Inicio del alquiler, con zona horaria.
+          type: string
+          format: date-time
+          example: "2026-07-16T08:00:00+02:00"
+        fecha_fin:
+          description: Fin del alquiler, posterior al inicio.
+          type: string
+          format: date-time
+          example: "2026-07-28T20:00:00+02:00"
+        comentarios:
+          description: Observaciones del proveedor para el administrador.
+          type: string
+          example: Necesitamos acceso para el camión de montaje.
+
+    Alquiler:
+      type: object
+      properties:
+        id:
+          description: Identificador del alquiler.
+          type: string
+          format: uuid
+          example: 1e2d3c4b-5a69-4788-9a6b-5c4d3e2f1a0b
+        espacio_id:
+          description: Espacio alquilado.
+          type: string
+          example: espacio-001
+        evento_id:
+          description: Evento del espacio.
+          type: string
+          example: evento-belgium
+        proveedor_id:
+          type: string
+          description: UID del proveedor (ms-usuarios)
+          example: uid-proveedor-ana
+        proveedor_nombre:
+          type: string
+          description: Nombre comercial (réplica local)
+          example: Frituras Boom S.L.
+        fecha_inicio:
+          description: Inicio del alquiler.
+          type: string
+          format: date-time
+          example: "2026-07-16T08:00:00+02:00"
+        fecha_fin:
+          description: Fin del alquiler.
+          type: string
+          format: date-time
+          example: "2026-07-28T20:00:00+02:00"
+        importe:
+          description: Importe en euros calculado a partir del precio del espacio.
+          type: number
+          format: float
+          example: 1500
+        estado:
+          $ref: '#/components/schemas/EstadoAlquiler'
+        comentarios:
+          description: Observaciones del proveedor o del administrador.
+          type: string
+          nullable: true
+          example: Instalación a partir del 16/07
+        creado_en:
+          description: Fecha de la solicitud.
+          type: string
+          format: date-time
+          example: "2026-04-02T11:20:00Z"
+
+    ReservaAforo:
+      type: object
+      properties:
+        reserva_id:
+          description: Identificador de la reserva, que ms-usuarios guarda en la entrada.
+          type: string
+          format: uuid
+          example: 7a6b5c4d-3e2f-4a1b-8c9d-0e1f2a3b4c5d
+        evento_id:
+          description: Evento reservado.
+          type: string
+          example: evento-belgium
+        tipo_pase:
+          $ref: '#/components/schemas/TipoPase'
+        precio:
+          description: Precio de la tarifa en el momento de la reserva; es lo que se cobra.
+          type: number
+          format: float
+          example: 199
+        expira_en:
+          description: Si la compra no se confirma antes de esta hora, la plaza se libera (10 minutos).
+          type: string
+          format: date-time
+          example: "2026-05-20T17:52:00Z"

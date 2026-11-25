@@ -1,0 +1,79 @@
+/* src/perfiles/escaletaTienda.css — Dueño: Sergio. Prefijo et-.
+   Paneles de perfil de tienda y escaleta (Mis pedidos, admin Tienda y admin Escaleta),
+   con el mismo aspecto que los de espacios. */
+.et-panel { color: #e5e5e5; }
+.et-panel-heading { margin-bottom: 24px; }
+.et-panel-heading h2 { margin: 0 0 8px; }
+.et-panel-heading p { color: #bbb; margin: 0; }
+.et-panel h3 { margin: 0 0 10px; }
+.et-panel button { cursor: pointer; }
+.et-panel button:disabled { cursor: wait; opacity: .55; }
+.et-panel input:focus-visible, .et-panel select:focus-visible, .et-panel textarea:focus-visible,
+.et-panel button:focus-visible { outline: 2px solid #f96b9d; outline-offset: 3px; }
+
+.et-panel input, .et-panel select, .et-panel textarea {
+  min-width: 0; max-width: 100%; padding: 9px 10px; border: 1px solid #555; border-radius: 6px;
+  background: #111; color: #eee; font: inherit;
+}
+.et-panel textarea { resize: vertical; min-height: 70px; }
+.et-panel label { display: grid; gap: 6px; color: #ccc; font-size: .9rem; }
+
+.et-tabs { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 20px; border-bottom: 1px solid #444; padding-bottom: 12px; }
+.et-tabs button { padding: 9px 16px; border: 1px solid #555; border-radius: 20px; background: transparent; color: #ddd; }
+.et-tabs button.activo { border-color: #bc0850; background: #bc0850; color: #fff; }
+
+.et-filtros { display: flex; flex-wrap: wrap; gap: 16px; align-items: end; margin-bottom: 20px; }
+
+.et-form { margin: 0 0 24px; padding: 20px; border: 1px solid #383838; border-radius: 10px; background: #121212; }
+.et-form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: 14px 16px; }
+.et-ancho { grid-column: 1 / -1; }
+.et-check { display: flex !important; align-items: center; gap: 10px !important; }
+.et-check input { accent-color: #bc0850; }
+
+.et-acciones { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; align-items: center; margin-top: 14px; }
+.et-acciones-izq { justify-content: flex-start; }
+
+.et-tarjetas { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 18px; }
+.et-tarjeta { background: #171717; border: 1px solid #383838; border-radius: 10px; padding: 18px; overflow-wrap: anywhere; }
+.et-tarjeta-retirada { opacity: .6; border-style: dashed; }
+.et-tarjeta-cabecera { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+.et-tarjeta p { margin: 6px 0; }
+
+.et-insignia { display: inline-block; padding: 4px 10px; border-radius: 16px; background: #30202a; color: #ff9fbd; font-size: .78rem; white-space: nowrap; }
+.et-insignia-gris { background: #2a2a2a; color: #bbb; }
+.et-insignia-verde { background: #13271f; color: #8fe3bf; }
+.et-insignia-roja { background: #3b1520; color: #ffb3c4; }
+
+.et-lista { list-style: none; padding: 0; margin: 8px 0; }
+.et-lista li { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0; border-bottom: 1px solid #2a2a2a; font-size: .92rem; }
+.et-lista li:last-child { border-bottom: none; }
+
+.et-tabla { width: 100%; border-collapse: collapse; font-size: .92rem; }
+.et-tabla th, .et-tabla td { padding: 8px 10px; border-bottom: 1px solid #2f2f2f; text-align: left; vertical-align: middle; }
+.et-tabla th { color: #aaa; font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .5px; }
+.et-tabla input, .et-tabla select { padding: 6px 8px; }
+.et-tabla-envoltura { overflow-x: auto; }
+
+.et-total { font-size: 1.15rem; font-weight: 700; color: #fff; }
+.et-apagado { color: #999; font-size: .85rem; }
+
+.et-error, .et-ok { margin: 14px 0; padding: 12px; border-left: 3px solid; }
+.et-error { color: #ffd1db; border-color: #f15b7b; background: #32151d; }
+.et-ok { color: #b8f1da; border-color: #65d6aa; background: #13271f; }
+
+.et-peligro { padding: 8px 14px; border: 1px solid #f15b7b; border-radius: 6px; background: #3b1520; color: #ffd1db; }
+.et-boton { padding: 8px 14px; border: 1px solid #555; border-radius: 6px; background: transparent; color: #ddd; }
+.et-boton:hover { border-color: #bc0850; }
+
+.et-escenario { margin-bottom: 24px; }
+.et-escenario h3 { padding-bottom: 8px; border-bottom: 1px solid #444; }
+.et-slot { display: grid; grid-template-columns: 150px 1fr auto; gap: 14px; align-items: start; padding: 12px; border: 1px solid #2f2f2f; border-radius: 8px; margin-bottom: 10px; background: #151515; }
+.et-slot-hora { font-weight: 700; color: #fff; }
+.et-slot-pase { display: grid; gap: 6px; }
+.et-slot-cancelado .et-slot-artista { text-decoration: line-through; opacity: .6; }
+.et-mini-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; margin-top: 8px; }
+.et-mini-form label { font-size: .8rem; }
+
+@media (max-width: 760px) {
+  .et-slot { grid-template-columns: 1fr; }
+}

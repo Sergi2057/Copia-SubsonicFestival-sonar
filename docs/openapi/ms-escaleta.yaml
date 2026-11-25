@@ -1,0 +1,1208 @@
+openapi: 3.0.3
+info:
+  title: Subsonic Festival - ms-escaleta
+  version: 1.0.0
+  description: |
+    Microservicio **Escaleta** de la arquitectura de Subsonic Festival (Grupo GA02).
+    La visión global de la arquitectura (componentes, almacenamiento, comunicación entre
+    servicios y atributos de calidad) está en la Memoria de la Práctica 1 (Practica1_Memoria_ASEE_GA02.pdf).
+
+    ## Responsabilidades
+    - Catálogo de **artistas** (géneros, biografía, imagen, canal de YouTube).
+    - **Slots**: franjas horarias de cada escenario y día (actuación, cambio de escenario o descanso).
+    - **Pases**: asignación de un artista a un slot, con formato (DJ set, live, b2b) y estado.
+    - **Publicación** versionada de la escaleta de cada evento y aviso en directo de cambios.
+    - Vídeos y playlists de los artistas obtenidos de la API de YouTube.
+
+    ## Actores
+    | Actor | Qué hace en este servicio |
+    |---|---|
+    | Visitante / cliente | Consulta la escaleta, los pases y las fichas de artistas (operaciones públicas). |
+    | Administrador | Gestiona artistas, slots y pases y publica la escaleta. |
+
+    ## Reglas de negocio
+    - Un slot no puede solaparse con otro del **mismo escenario** (restricción de exclusión en la base de datos). Si ocurre se responde `409`.
+    - Un artista no puede tener dos pases que coincidan en el tiempo en escenarios distintos (`409`).
+    - Cada pase tiene un campo `version`. Al modificarlo hay que enviar la versión actual; si otro administrador lo cambió antes se responde `409` (control de concurrencia optimista).
+    - Los cambios en slots y pases forman un **borrador**. Los visitantes solo ven la última versión **publicada**, que se guarda como instantánea y se sirve desde caché (Redis).
+    - Los escenarios son espacios de tipo `ESCENARIO` cuyo propietario es **ms-espacios**. Este servicio guarda una réplica de solo lectura que actualiza con los eventos `espacios.espacio.*`.
+    - Si YouTube no responde, `/artistas/{artista_id}/videos` devuelve una lista vacía (circuit breaker y caché de 24 h).
+
+    ## Almacenamiento
+    **PostgreSQL** (`escaleta_db`) + caché **Redis** para la escaleta publicada. Relacional porque la escaleta tiene relaciones fuertes (slot → pase → artista) y la regla de no solapamiento se garantiza con una restricción de exclusión de la propia base de datos.
+
+    **artistas**: catálogo de artistas
+
+    | Campo | Tipo | Descripción |
+    |---|---|---|
+    | id | UUID (PK) | Identificador del artista. |
+    | nombre | VARCHAR(255) | Nombre artístico (p. ej. «Armin van Buuren»). |
+    | generos | JSONB | Lista de géneros: ["trance", "progressive"]. Se usa en las recomendaciones. |
+    | pais | VARCHAR(100) | País de origen. |
+    | biografia | TEXT | Descripción del artista. |
+    | imagen_url | VARCHAR(500) | Foto promocional. |
+    | youtube_channel_id | VARCHAR(100) | Canal de YouTube para obtener vídeos y playlists. |
+    | redes | JSONB | Enlaces a redes sociales. |
+
+    **escenarios**: réplica local de los espacios de tipo ESCENARIO (propietario: ms-espacios)
+
+    | Campo | Tipo | Descripción |
+    |---|---|---|
+    | espacio_id | VARCHAR(50) (PK) | Identificador del espacio en ms-espacios. |
+    | evento_id | VARCHAR(100) | Evento al que pertenece. |
+    | nombre | VARCHAR(100) | Nombre del escenario (p. ej. «Main Stage», «Trance Stage»). |
+    | aforo | INTEGER | Aforo máximo del escenario. |
+    | actualizado_en | TIMESTAMPTZ | Fecha del último evento recibido. |
+
+    **slots**: franjas horarias de cada escenario
+
+    | Campo | Tipo | Descripción |
+    |---|---|---|
+    | id | UUID (PK) | Identificador del slot. |
+    | evento_id | VARCHAR(100) | Evento (referencia a ms-espacios). |
+    | espacio_id | VARCHAR(50) (FK escenarios) | Escenario en el que se produce. |
+    | inicio / fin | TIMESTAMPTZ | Inicio y fin de la franja. Restricción de exclusión: no puede solaparse con otro slot del mismo escenario. |
+    | tipo | VARCHAR(20) | ACTUACION, CAMBIO_ESCENARIO o DESCANSO. |
+
+    **pases**: actuaciones asignadas a los slots
+
+    | Campo | Tipo | Descripción |
+    |---|---|---|
+    | id | UUID (PK) | Identificador del pase. |
+    | slot_id | UUID (FK slots) | Slot que ocupa. |
+    | artista_id | UUID (FK artistas) | Artista que actúa. |
+    | formato | VARCHAR(20) | DJ_SET, LIVE o B2B. |
+    | estado | VARCHAR(20) | PROGRAMADO, CONFIRMADO, EN_CURSO, FINALIZADO o CANCELADO. |
+    | notas_tecnicas | TEXT | Necesidades técnicas (rider). |
+    | version | INTEGER | Se incrementa en cada cambio (control de concurrencia optimista). |
+
+    **publicaciones**: historial de versiones publicadas de la escaleta
+
+    | Campo | Tipo | Descripción |
+    |---|---|---|
+    | evento_id | VARCHAR(100) (PK) | Evento. |
+    | version | INTEGER (PK) | Número de versión publicada. |
+    | publicada_en | TIMESTAMPTZ | Fecha de publicación. |
+    | publicada_por | VARCHAR(128) | Identificador del administrador. |
+    | instantanea | JSONB | Copia completa de la escaleta publicada, que se sirve tal cual al front-end. |
+
+    **Origen en la versión monolítica actual**: El campo JSON `horarios` de la tabla `festivales` actual pasa a las tablas `slots` y `pases`.
+
+    ## Estados de un pase
+    ```text
+    PROGRAMADO --> CONFIRMADO --> EN_CURSO --> FINALIZADO
+         |              |
+         +--------------+-----------> CANCELADO
+    ```
+
+    ## Eventos que publica (RabbitMQ, exchange `subsonic.events`)
+    | Evento | Cuándo | Lo consumen |
+    |---|---|---|
+    | `escaleta.publicada` | Se publica una nueva versión | ms-usuarios (avisa a los clientes con entrada), ms-analitica |
+    | `escaleta.pase.modificado` | Cambia el horario, escenario o estado de un pase | ms-usuarios (avisa a quien tiene al artista en favoritos), ms-analitica |
+    | `escaleta.pase.cancelado` | Se cancela un pase | ms-usuarios, ms-analitica |
+    | `escaleta.artista.creado` / `actualizado` | Alta o cambio de un artista | ms-analitica, ms-usuarios (nombre copiado en favoritos) |
+
+    ## Eventos que consume
+    | Evento | Reacción |
+    |---|---|
+    | `espacios.espacio.creado` / `actualizado` / `eliminado` | Actualiza la réplica de escenarios (solo tipo `ESCENARIO`). |
+    | `espacios.evento.publicado` | Permite crear slots para el evento. |
+    | `espacios.evento.cancelado` | Cancela todos los pases del evento. |
+
+    ## Flujo: cambio en la escaleta durante el festival
+    ```text
+          Admin          Gateway       ms-escaleta     Apps (SSE)        Broker        ms-usuarios
+            |               |               |               |               |               |
+            | 1. PATCH /pases/{id}          |               |               |               |
+            |-------------->|               |               |               |               |
+            |               | 2. rol = admin|               |               |               |
+            |               |-------------->|               |               |               |
+            |               |               | 3. valida solape y version
+            | 4. 200 pase   |               |               |               |               |
+            |<------------------------------|               |               |               |
+            |               |               | 5. pase.modificado            |               |
+            |               |               |-------------->|               |               |
+            |               |               | 6. escaleta.pase.modificado   |               |
+            |               |               |~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~>|               |
+            |               |               |               |               | 7. push a sus fans
+            |               |               |               |               |~~~~~~~~~~~~~~>|
+            |               |               |               |               |               |
+    ```
+    `---` llamada síncrona (HTTP) · `~~~` mensaje asíncrono (evento)
+  contact:
+    name: Grupo GA02 - ASEE, Universidad de Extremadura
+servers:
+  - url: https://api.subsonicfestival.com/api/v1
+    description: Producción (a través del API Gateway)
+  - url: http://localhost:8000/api/v1
+    description: Desarrollo local
+tags:
+  - name: Escaleta
+    description: Consulta y publicación de la escaleta de un evento
+  - name: Slots
+    description: Franjas horarias de los escenarios (administración)
+  - name: Pases
+    description: Actuaciones asignadas a los slots
+  - name: Artistas
+    description: Catálogo de artistas
+security:
+  - bearerAuth: []
+
+paths:
+  /escaletas/{evento_id}:
+    parameters:
+      - $ref: '#/components/parameters/EventoId'
+    get:
+      tags: [Escaleta]
+      summary: Obtener la escaleta publicada de un evento
+      description: |
+        Devuelve la última versión publicada de la escaleta, agrupada por día y escenario.
+        Es la consulta más frecuente del sistema y se sirve desde caché. **Público.**
+      operationId: obtenerEscaleta
+      security: []
+      responses:
+        '200':
+          description: Escaleta publicada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Escaleta'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+
+  /escaletas/{evento_id}/escenarios/{espacio_id}:
+    parameters:
+      - $ref: '#/components/parameters/EventoId'
+      - $ref: '#/components/parameters/EspacioId'
+    get:
+      tags: [Escaleta]
+      summary: Obtener la escaleta de un escenario
+      description: Pases publicados de un único escenario del evento, ordenados por hora. **Público.**
+      operationId: obtenerEscaletaEscenario
+      security: []
+      responses:
+        '200':
+          description: Escaleta del escenario
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EscaletaEscenario'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+
+  /escaletas/{evento_id}/cambios:
+    parameters:
+      - $ref: '#/components/parameters/EventoId'
+    get:
+      tags: [Escaleta]
+      summary: Suscribirse a los cambios en directo de la escaleta
+      description: |
+        Conexión **Server-Sent Events**. Cada vez que un pase cambia de horario o de estado
+        se envía un mensaje `data:` con un objeto `CambioEscaleta` en JSON. **Público.**
+      operationId: suscribirCambiosEscaleta
+      security: []
+      responses:
+        '200':
+          description: Flujo de eventos (text/event-stream)
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                example: |
+                  event: pase.modificado
+                  data: {"pase_id":"a91e4b6c-0d2f-4e8a-b7c1-3f5d9e2a6b84","artista":"Tiësto","escenario":"Main Stage","inicio":"2026-07-19T00:30:00+02:00","fin":"2026-07-19T02:30:00+02:00","estado":"CONFIRMADO"}
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+
+  /escaletas/{evento_id}/publicaciones:
+    parameters:
+      - $ref: '#/components/parameters/EventoId'
+    get:
+      tags: [Escaleta]
+      summary: Historial de publicaciones de la escaleta
+      description: Lista de versiones publicadas. **Rol:** admin.
+      operationId: listarPublicaciones
+      responses:
+        '200':
+          description: Versiones publicadas, de la más reciente a la más antigua
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Publicacion'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+    post:
+      tags: [Escaleta]
+      summary: Publicar una nueva versión de la escaleta
+      description: |
+        Genera una instantánea de todos los slots y pases del evento, incrementa la versión
+        y publica el evento `escaleta.publicada`. **Rol:** admin.
+      operationId: publicarEscaleta
+      responses:
+        '201':
+          description: Nueva versión publicada
+          headers:
+            Location:
+              description: URL de la escaleta publicada
+              schema:
+                type: string
+                example: /api/v1/escaletas/evento-belgium
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Publicacion'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          description: No hay cambios desde la última publicación o el evento no admite escaleta
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /escaletas/{evento_id}/slots:
+    parameters:
+      - $ref: '#/components/parameters/EventoId'
+    get:
+      tags: [Slots]
+      summary: Listar los slots de un evento (borrador incluido)
+      description: Incluye los cambios aún no publicados. **Rol:** admin.
+      operationId: listarSlots
+      parameters:
+        - name: espacio_id
+          in: query
+          description: Filtrar por escenario
+          schema:
+            type: string
+        - name: fecha
+          in: query
+          description: Filtrar por día
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Slots del evento
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Slot'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+    post:
+      tags: [Slots]
+      summary: Crear un slot en un escenario
+      description: |
+        No puede solaparse con otro slot del mismo escenario. **Rol:** admin.
+      operationId: crearSlot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SlotEntrada'
+      responses:
+        '201':
+          description: Slot creado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Slot'
+        '400':
+          $ref: '#/components/responses/PeticionNoValida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          $ref: '#/components/responses/Solapamiento'
+
+  /slots/{slot_id}:
+    parameters:
+      - $ref: '#/components/parameters/SlotId'
+    get:
+      tags: [Slots]
+      summary: Obtener un slot
+      description: '**Rol:** admin.'
+      operationId: obtenerSlot
+      responses:
+        '200':
+          description: Slot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Slot'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    put:
+      tags: [Slots]
+      summary: Modificar un slot
+      description: '**Rol:** admin.'
+      operationId: modificarSlot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SlotEntrada'
+      responses:
+        '200':
+          description: Slot modificado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Slot'
+        '400':
+          $ref: '#/components/responses/PeticionNoValida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          $ref: '#/components/responses/Solapamiento'
+    delete:
+      tags: [Slots]
+      summary: Eliminar un slot
+      description: Elimina el slot y el pase que tenga asignado. **Rol:** admin.
+      operationId: eliminarSlot
+      responses:
+        '204':
+          description: Slot eliminado
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+
+  /slots/{slot_id}/pases:
+    parameters:
+      - $ref: '#/components/parameters/SlotId'
+    post:
+      tags: [Pases]
+      summary: Asignar un artista a un slot
+      description: |
+        Crea el pase del slot. Un slot solo admite un pase y un artista no puede tener dos
+        pases a la vez en escenarios distintos. **Rol:** admin.
+      operationId: crearPase
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaseEntrada'
+      responses:
+        '201':
+          description: Pase creado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pase'
+        '400':
+          $ref: '#/components/responses/PeticionNoValida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          $ref: '#/components/responses/Solapamiento'
+
+  /pases/{pase_id}:
+    parameters:
+      - $ref: '#/components/parameters/PaseId'
+    get:
+      tags: [Pases]
+      summary: Obtener un pase
+      description: '**Público.**'
+      operationId: obtenerPase
+      security: []
+      responses:
+        '200':
+          description: Pase
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pase'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    patch:
+      tags: [Pases]
+      summary: Modificar un pase (retraso, cancelación, cambio de escenario…)
+      description: |
+        Solo se envían los campos que cambian. Hay que indicar la `version` actual del pase
+        (control de concurrencia optimista). Publica `escaleta.pase.modificado` o
+        `escaleta.pase.cancelado` y notifica a las apps conectadas por SSE. **Rol:** admin.
+      operationId: modificarPase
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaseCambio'
+            example:
+              version: 3
+              inicio: '2026-07-19T00:30:00+02:00'
+              fin: '2026-07-19T02:30:00+02:00'
+              motivo: Retraso técnico
+      responses:
+        '200':
+          description: Pase modificado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pase'
+        '400':
+          $ref: '#/components/responses/PeticionNoValida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          description: El nuevo horario se solapa o la versión no coincide (otro administrador lo ha cambiado)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags: [Pases]
+      summary: Quitar el artista de un slot
+      description: El slot queda libre. **Rol:** admin.
+      operationId: eliminarPase
+      responses:
+        '204':
+          description: Pase eliminado
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+
+  /artistas:
+    get:
+      tags: [Artistas]
+      summary: Buscar artistas
+      description: '**Público.**'
+      operationId: buscarArtistas
+      security: []
+      parameters:
+        - name: q
+          in: query
+          description: Texto a buscar en el nombre
+          schema:
+            type: string
+        - name: genero
+          in: query
+          schema:
+            type: string
+            example: techno
+        - name: evento_id
+          in: query
+          description: Solo artistas con algún pase en este evento
+          schema:
+            type: string
+        - $ref: '#/components/parameters/Limite'
+        - $ref: '#/components/parameters/Desplazamiento'
+      responses:
+        '200':
+          description: Artistas encontrados
+          headers:
+            X-Total-Count:
+              $ref: '#/components/headers/XTotalCount'
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Artista'
+    post:
+      tags: [Artistas]
+      summary: Dar de alta un artista
+      description: Publica `escaleta.artista.creado`. **Rol:** admin.
+      operationId: crearArtista
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ArtistaEntrada'
+      responses:
+        '201':
+          description: Artista creado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Artista'
+        '400':
+          $ref: '#/components/responses/PeticionNoValida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+
+  /artistas/{artista_id}:
+    parameters:
+      - $ref: '#/components/parameters/ArtistaId'
+    get:
+      tags: [Artistas]
+      summary: Obtener la ficha de un artista
+      description: Incluye sus pases publicados. **Público.**
+      operationId: obtenerArtista
+      security: []
+      responses:
+        '200':
+          description: Ficha del artista
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtistaDetalle'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    put:
+      tags: [Artistas]
+      summary: Modificar un artista
+      description: Publica `escaleta.artista.actualizado`. **Rol:** admin.
+      operationId: modificarArtista
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ArtistaEntrada'
+      responses:
+        '200':
+          description: Artista modificado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Artista'
+        '400':
+          $ref: '#/components/responses/PeticionNoValida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    delete:
+      tags: [Artistas]
+      summary: Eliminar un artista
+      description: Solo si no tiene pases asignados. **Rol:** admin.
+      operationId: eliminarArtista
+      responses:
+        '204':
+          description: Artista eliminado
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          description: El artista tiene pases asignados
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /artistas/{artista_id}/videos:
+    parameters:
+      - $ref: '#/components/parameters/ArtistaId'
+    get:
+      tags: [Artistas]
+      summary: Vídeos y playlists del artista
+      description: |
+        Obtenidos de la API de YouTube a partir del canal del artista (se cachean 24 h).
+        Si YouTube no responde se devuelve una lista vacía. **Público.**
+      operationId: listarVideosArtista
+      security: []
+      responses:
+        '200':
+          description: Vídeos del artista
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Video'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Token de Firebase Authentication. El rol va en el custom claim `rol`.
+
+  parameters:
+    EventoId:
+      name: evento_id
+      in: path
+      required: true
+      description: Identificador del evento (propietario ms-espacios)
+      schema:
+        type: string
+        example: evento-belgium
+    EspacioId:
+      name: espacio_id
+      in: path
+      required: true
+      description: Identificador del escenario (espacio de tipo ESCENARIO)
+      schema:
+        type: string
+        example: espacio-010
+    SlotId:
+      name: slot_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    PaseId:
+      name: pase_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ArtistaId:
+      name: artista_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    Limite:
+      name: limite
+      in: query
+      description: Número máximo de resultados
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    Desplazamiento:
+      name: desplazamiento
+      in: query
+      description: Número de resultados que se saltan (paginación)
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+
+  headers:
+    XTotalCount:
+      description: Número total de resultados sin paginar
+      schema:
+        type: integer
+
+  responses:
+    PeticionNoValida:
+      description: Datos de entrada no válidos
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NoAutenticado:
+      description: Falta el token o no es válido
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    SinPermiso:
+      description: El rol del usuario no permite esta operación
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NoEncontrado:
+      description: El recurso no existe
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Solapamiento:
+      description: El horario se solapa con otro slot del escenario o con otro pase del artista
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    Error:
+      type: object
+      required: [codigo, mensaje]
+      properties:
+        codigo:
+          description: Código del error, estable y en mayúsculas, para que el cliente lo trate sin leer el mensaje.
+          type: string
+          example: SLOT_SOLAPADO
+        mensaje:
+          description: Explicación del error para mostrar al usuario.
+          type: string
+          example: El slot se solapa con otro del mismo escenario
+        detalles:
+          description: Información adicional, por ejemplo el slot con el que se solapa.
+          type: object
+          additionalProperties: true
+          example: {slot_id: 5b8e2f10-4c3d-4e2a-9f1b-7a6c5d4e3f21}
+        correlation_id:
+          description: Identificador de la petición, el mismo en los logs de todos los servicios que intervienen.
+          type: string
+          format: uuid
+          example: 9b2f6c1e-3d4a-4b5c-8d7e-1f2a3b4c5d6e
+
+    Artista:
+      type: object
+      required: [id, nombre]
+      properties:
+        id:
+          description: Identificador del artista.
+          type: string
+          format: uuid
+          readOnly: true
+          example: "22222222-2222-4222-8222-000000000001"
+        nombre:
+          description: Nombre artístico.
+          type: string
+          example: Armin van Buuren
+        generos:
+          description: Géneros musicales del artista.
+          type: array
+          items:
+            type: string
+          example: [trance, progressive]
+        pais:
+          description: País de origen.
+          type: string
+          example: Países Bajos
+        biografia:
+          description: Biografía que se muestra en la ficha del artista.
+          type: string
+          example: DJ y productor neerlandés, referente mundial del trance.
+        imagen_url:
+          description: URL de la foto del artista.
+          type: string
+          format: uri
+          example: https://cdn.subsonicfestival.com/artistas/armin-van-buuren.jpg
+        youtube_channel_id:
+          description: Canal de YouTube del artista, para mostrar sus vídeos; null si no tiene.
+          type: string
+          nullable: true
+          example: UCejemploCanalDeArmin000
+        redes:
+          description: "Redes sociales: nombre de la red y URL del perfil."
+          type: object
+          additionalProperties:
+            type: string
+            format: uri
+          example:
+            instagram: https://instagram.com/arminvanbuuren
+
+    ArtistaEntrada:
+      type: object
+      required: [nombre, generos]
+      properties:
+        nombre:
+          description: Nombre artístico.
+          type: string
+          minLength: 1
+          maxLength: 255
+          example: Armin van Buuren
+        generos:
+          description: Géneros musicales (al menos uno).
+          type: array
+          minItems: 1
+          items:
+            type: string
+          example: [trance, progressive]
+        pais:
+          description: País de origen.
+          type: string
+          example: Países Bajos
+        biografia:
+          description: Biografía que se muestra en la ficha del artista.
+          type: string
+          example: DJ y productor neerlandés, referente mundial del trance.
+        imagen_url:
+          description: URL de la foto del artista.
+          type: string
+          format: uri
+          example: https://cdn.subsonicfestival.com/artistas/armin-van-buuren.jpg
+        youtube_channel_id:
+          description: Canal de YouTube del artista, para mostrar sus vídeos.
+          type: string
+          example: UCejemploCanalDeArmin000
+        redes:
+          description: "Redes sociales: nombre de la red y URL del perfil."
+          type: object
+          additionalProperties:
+            type: string
+            format: uri
+          example: {instagram: 'https://instagram.com/arminvanbuuren'}
+
+    ArtistaDetalle:
+      description: Artista con sus actuaciones programadas en todos los eventos.
+      allOf:
+        - $ref: '#/components/schemas/Artista'
+        - type: object
+          properties:
+            pases:
+              description: Actuaciones programadas del artista.
+              type: array
+              items:
+                $ref: '#/components/schemas/PaseResumen'
+
+    Escenario:
+      type: object
+      properties:
+        espacio_id:
+          description: Espacio de tipo escenario en ms-espacios.
+          type: string
+          example: espacio-010
+        evento_id:
+          description: Evento al que pertenece el escenario.
+          type: string
+          example: evento-belgium
+        nombre:
+          description: Nombre del escenario.
+          type: string
+          example: Main Stage
+        aforo:
+          description: Capacidad máxima de personas.
+          type: integer
+          example: 25000
+
+    TipoSlot:
+      description: "Uso de un hueco de la escaleta: actuación de un artista, cambio de montaje entre actuaciones o descanso."
+      type: string
+      enum: [ACTUACION, CAMBIO_ESCENARIO, DESCANSO]
+
+    Slot:
+      type: object
+      required: [id, evento_id, espacio_id, inicio, fin, tipo]
+      properties:
+        id:
+          description: Identificador del slot.
+          type: string
+          format: uuid
+          readOnly: true
+          example: 5b8e2f10-4c3d-4e2a-9f1b-7a6c5d4e3f21
+        evento_id:
+          description: Evento del slot.
+          type: string
+          example: evento-belgium
+        espacio_id:
+          description: Escenario donde tiene lugar.
+          type: string
+          example: espacio-010
+        inicio:
+          description: Hora de inicio, con zona horaria.
+          type: string
+          format: date-time
+          example: '2026-07-18T22:00:00+02:00'
+        fin:
+          description: Hora de fin, con zona horaria. Dos slots del mismo escenario no se pueden solapar.
+          type: string
+          format: date-time
+          example: '2026-07-19T00:00:00+02:00'
+        tipo:
+          $ref: '#/components/schemas/TipoSlot'
+        pase:
+          allOf:
+            - $ref: '#/components/schemas/Pase'
+          nullable: true
+          description: Pase asignado (null si el slot está libre)
+          example: {id: 8d3c1b2a-6f5e-4d4c-9b3a-2e1f0a9b8c7d, slot_id: 5b8e2f10-4c3d-4e2a-9f1b-7a6c5d4e3f21, artista_id: 22222222-2222-4222-8222-000000000001, artista_nombre: Armin van Buuren, formato: DJ_SET, estado: CONFIRMADO, version: 1}
+
+    SlotEntrada:
+      type: object
+      required: [espacio_id, inicio, fin, tipo]
+      properties:
+        espacio_id:
+          description: Escenario donde tiene lugar (espacio de ms-espacios).
+          type: string
+          example: espacio-010
+        inicio:
+          description: Hora de inicio, con zona horaria.
+          type: string
+          format: date-time
+          example: "2026-07-18T22:00:00+02:00"
+        fin:
+          description: Hora de fin, posterior al inicio.
+          type: string
+          format: date-time
+          example: "2026-07-19T00:00:00+02:00"
+        tipo:
+          $ref: '#/components/schemas/TipoSlot'
+
+    FormatoPase:
+      description: "Formato de la actuación: sesión de DJ, directo o B2B (dos artistas a la vez)."
+      type: string
+      enum: [DJ_SET, LIVE, B2B]
+
+    EstadoPase:
+      description: Estado de la actuación. Las transiciones están en la descripción del servicio.
+      type: string
+      enum: [PROGRAMADO, CONFIRMADO, EN_CURSO, FINALIZADO, CANCELADO]
+
+    Pase:
+      type: object
+      required: [id, slot_id, artista_id, formato, estado, version]
+      properties:
+        id:
+          description: Identificador del pase.
+          type: string
+          format: uuid
+          readOnly: true
+          example: 8d3c1b2a-6f5e-4d4c-9b3a-2e1f0a9b8c7d
+        slot_id:
+          description: Slot (escenario y horario) donde actúa.
+          type: string
+          format: uuid
+          example: 5b8e2f10-4c3d-4e2a-9f1b-7a6c5d4e3f21
+        artista_id:
+          description: Artista que actúa.
+          type: string
+          format: uuid
+          example: "22222222-2222-4222-8222-000000000001"
+        artista_nombre:
+          description: Nombre del artista, para mostrarlo sin otra consulta.
+          type: string
+          readOnly: true
+          example: Tiësto
+        formato:
+          $ref: '#/components/schemas/FormatoPase'
+        estado:
+          $ref: '#/components/schemas/EstadoPase'
+        notas_tecnicas:
+          description: Necesidades técnicas para el equipo de producción; no se muestran al público.
+          type: string
+          nullable: true
+          example: Necesita 2 CDJ-3000 y mesa DJM-V10.
+        version:
+          description: Versión del pase; sube con cada cambio. Hay que enviarla al modificarlo (control de concurrencia).
+          type: integer
+          minimum: 1
+          readOnly: true
+          example: 3
+
+    PaseEntrada:
+      type: object
+      required: [artista_id, formato]
+      properties:
+        artista_id:
+          description: Artista que actúa.
+          type: string
+          format: uuid
+          example: "22222222-2222-4222-8222-000000000001"
+        formato:
+          $ref: '#/components/schemas/FormatoPase'
+        notas_tecnicas:
+          description: Necesidades técnicas para el equipo de producción.
+          type: string
+          example: Necesita 2 CDJ-3000 y mesa DJM-V10.
+
+    PaseCambio:
+      type: object
+      required: [version]
+      description: Campos modificables de un pase. Si cambia el horario se mueve también su slot.
+      properties:
+        version:
+          type: integer
+          description: Versión actual del pase (control de concurrencia)
+          example: 3
+        estado:
+          $ref: '#/components/schemas/EstadoPase'
+        inicio:
+          description: Nueva hora de inicio.
+          type: string
+          format: date-time
+          example: "2026-07-18T23:00:00+02:00"
+        fin:
+          description: Nueva hora de fin.
+          type: string
+          format: date-time
+          example: "2026-07-19T01:00:00+02:00"
+        espacio_id:
+          type: string
+          description: Nuevo escenario
+          example: espacio-011
+        formato:
+          $ref: '#/components/schemas/FormatoPase'
+        motivo:
+          type: string
+          description: Motivo que se muestra en la notificación a los asistentes
+          example: Retraso del vuelo del artista
+
+    PaseResumen:
+      type: object
+      properties:
+        pase_id:
+          description: Identificador del pase.
+          type: string
+          format: uuid
+          example: 8d3c1b2a-6f5e-4d4c-9b3a-2e1f0a9b8c7d
+        artista_id:
+          description: Identificador del artista.
+          type: string
+          format: uuid
+          example: "22222222-2222-4222-8222-000000000002"
+        artista:
+          description: Nombre del artista.
+          type: string
+          example: Martin Garrix
+        escenario:
+          description: Nombre del escenario.
+          type: string
+          example: Main Stage
+        inicio:
+          description: Hora de inicio.
+          type: string
+          format: date-time
+          example: "2026-07-18T22:00:00+02:00"
+        fin:
+          description: Hora de fin.
+          type: string
+          format: date-time
+          example: "2026-07-19T00:00:00+02:00"
+        estado:
+          $ref: '#/components/schemas/EstadoPase'
+
+    EscaletaEscenario:
+      type: object
+      properties:
+        espacio_id:
+          description: Escenario (espacio de ms-espacios).
+          type: string
+          example: espacio-010
+        nombre:
+          description: Nombre del escenario.
+          type: string
+          example: Main Stage
+        pases:
+          description: Actuaciones del día en este escenario.
+          type: array
+          items:
+            $ref: '#/components/schemas/PaseResumen'
+
+    Escaleta:
+      type: object
+      required: [evento_id, version, publicada_en, dias]
+      properties:
+        evento_id:
+          description: Evento de la escaleta.
+          type: string
+          example: evento-belgium
+        version:
+          description: Número de publicación; sube cada vez que el administrador publica cambios.
+          type: integer
+          example: 4
+        publicada_en:
+          description: Fecha y hora de la última publicación.
+          type: string
+          format: date-time
+          example: "2026-07-10T12:00:00Z"
+        dias:
+          description: Programación agrupada por día y escenario.
+          type: array
+          items:
+            type: object
+            properties:
+              fecha:
+                description: Día del festival.
+                type: string
+                format: date
+                example: '2026-07-18'
+              escenarios:
+                description: Escenarios con actuaciones ese día.
+                type: array
+                items:
+                  $ref: '#/components/schemas/EscaletaEscenario'
+
+    Publicacion:
+      type: object
+      properties:
+        evento_id:
+          description: Evento cuya escaleta se ha publicado.
+          type: string
+          example: evento-belgium
+        version:
+          description: Número de la nueva publicación.
+          type: integer
+          example: 4
+        publicada_en:
+          description: Fecha y hora de la publicación.
+          type: string
+          format: date-time
+          example: "2026-07-10T12:00:00Z"
+        publicada_por:
+          type: string
+          description: UID del administrador
+          example: uid-admin-jose
+
+    CambioEscaleta:
+      type: object
+      description: Contenido de cada mensaje SSE de /escaletas/{evento_id}/cambios
+      properties:
+        tipo:
+          description: "Qué ha cambiado: un pase modificado, un pase cancelado o una nueva publicación completa."
+          type: string
+          enum: [pase.modificado, pase.cancelado, escaleta.publicada]
+          example: pase.modificado
+        pase:
+          $ref: '#/components/schemas/PaseResumen'
+        version:
+          description: Versión de la escaleta tras el cambio.
+          type: integer
+          example: 5
+
+    Video:
+      type: object
+      properties:
+        titulo:
+          description: Título del vídeo o la lista en YouTube.
+          type: string
+          example: Armin van Buuren live at Tomorrowland 2025
+        url:
+          description: Enlace para verlo en YouTube.
+          type: string
+          format: uri
+          example: https://www.youtube.com/watch?v=Xk3eJmPq9sA
+        miniatura_url:
+          description: Imagen de vista previa.
+          type: string
+          format: uri
+          example: https://i.ytimg.com/vi/Xk3eJmPq9sA/hqdefault.jpg
+        tipo:
+          description: Si el resultado es un vídeo o una lista de reproducción.
+          type: string
+          enum: [VIDEO, PLAYLIST]
+          example: VIDEO

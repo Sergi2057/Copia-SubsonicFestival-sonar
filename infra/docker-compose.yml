@@ -1,0 +1,31 @@
+# Infraestructura común de Subsonic Festival
+#   docker compose up -d     -> RabbitMQ en amqp://subsonic:subsonic@localhost:5672/
+#                               panel web en http://localhost:15672 (usuario subsonic / subsonic)
+#
+# Crea la red "subsonic": cada microservicio se une a ella en su docker-compose.yml para
+# llegar a RabbitMQ por su nombre (amqp://subsonic:subsonic@rabbitmq:5672/).
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    hostname: rabbitmq
+    ports:
+      - "5672:5672"     # mensajes (AMQP)
+      - "15672:15672"   # panel de administración
+    volumes:
+      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - ./rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
+      - rabbitmq-datos:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    networks:
+      - subsonic
+
+volumes:
+  rabbitmq-datos:
+
+networks:
+  subsonic:
+    name: subsonic

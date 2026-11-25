@@ -1,0 +1,12 @@
+# Añadir a docker-compose.yml cuando se disponga de la cuenta de servicio del monolito.
+services:
+  ms-usuarios:
+    environment:
+      FIREBASE_CREDENCIALES: /run/secrets/firebase-claves.json
+    volumes:
+      - type: bind
+        source: ${FIREBASE_CREDENCIALES:?Indica la ruta al JSON de Firebase en .env}
+        target: /run/secrets/firebase-claves.json
+        read_only: true
+        bind:
+          create_host_path: false

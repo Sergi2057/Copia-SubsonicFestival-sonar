@@ -1,0 +1,55 @@
+/* Pantallas de usuarios · Luis. Todas las reglas están acotadas a us-. */
+.us-panel { color: #e5e5e5; }
+.us-panel h2 { font-size: 1.6rem; margin-bottom: 20px; }
+.us-panel h3 { margin: 0 0 12px; }
+.us-panel p { line-height: 1.6; }
+.us-panel button { cursor: pointer; }
+.us-panel button:disabled { cursor: wait; opacity: .55; }
+.us-panel button:focus-visible, .us-panel a:focus-visible, .us-panel input:focus-visible,
+.us-panel select:focus-visible, .us-panel textarea:focus-visible { outline: 2px solid #f96b9d; outline-offset: 3px; }
+.us-cabecera, .us-acciones { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
+.us-cabecera h2 { margin: 0; }
+.us-cabecera { margin-bottom: 24px; }
+.us-acciones { justify-content: flex-start; margin-top: 16px; }
+.us-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 20px; }
+.us-tarjeta { background: #171717; border: 1px solid #383838; padding: 24px; border-radius: 12px; }
+.us-campo { display: grid; gap: 7px; margin-bottom: 18px; font-size: .9rem; }
+.us-campo input, .us-campo select, .us-campo textarea, .us-panel select {
+  background: #111; color: #eee; border: 1px solid #555; border-radius: 6px; padding: 12px; max-width: 100%; font: inherit;
+}
+.us-campo textarea { resize: vertical; min-height: 90px; }
+.us-formulario { max-width: 780px; }
+.us-form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 0 20px; }
+.us-panel fieldset { border: 0; padding: 0; min-width: 0; }
+.us-panel legend { font-weight: bold; margin-bottom: 16px; }
+.us-ayuda { color: #b9b9b9; font-size: .9rem; margin: 12px 0; }
+.us-error { border-left: 3px solid #ff6c86; padding: 14px; background: #32151d; margin: 16px 0; color: #ffdbe3; }
+.us-exito { border-left: 3px solid #65d6aa; padding: 14px; background: #13271f; margin: 16px 0; color: #b8f1da; }
+.us-estado { display: inline-block; border-radius: 20px; padding: 5px 10px; background: #313131; font-size: .78rem; margin-bottom: 14px; }
+.us-resumen { display: grid; grid-template-columns: 1fr auto; gap: 12px; margin: 22px 0; }
+.us-resumen dt { color: #b9b9b9; }
+.us-resumen dd { text-align: right; }
+.us-qr { background: white; color: #111; border-radius: 10px; padding: 20px; text-align: center; margin: 20px 0; overflow-wrap: anywhere; }
+.us-qr svg { display: block; margin: 0 auto 12px; width: 100%; max-width: 192px; height: auto; }
+.us-modal-fondo { position: fixed; z-index: 500; inset: 0; background: #000c; display: grid; place-items: center; padding: 20px; }
+.us-modal { width: min(100%, 520px); max-height: 90dvh; overflow-y: auto; background: #151515; border: 1px solid #555; border-radius: 14px; padding: 28px; }
+.us-modal .btn-secondary { padding: 10px 14px; border: 1px solid #555; border-radius: 6px; background: transparent; color: #eee; }
+.us-modal button[aria-label="Cerrar ventana"] { min-width: 44px; min-height: 44px; font-size: 1.3rem; line-height: 1; }
+.us-panel .us-peligro { border: 1px solid #f15b7b; background: #3b1520; color: #ffd1db; padding: 12px 18px; border-radius: 6px; }
+.us-peligros { margin-top: 32px; padding-top: 24px; border-top: 1px solid #444; }
+.us-check { display: flex; align-items: center; gap: 12px; margin: 18px 0; }
+.us-check input { width: 20px; height: 20px; accent-color: #bc0850; }
+.us-tabla-scroll { overflow-x: auto; margin-top: 20px; }
+.us-tabla { width: 100%; border-collapse: collapse; text-align: left; }
+.us-tabla th, .us-tabla td { padding: 14px; border-bottom: 1px solid #444; vertical-align: top; }
+.us-tabla th { color: #b9b9b9; font-size: .85rem; }
+.us-tabla td p { overflow-wrap: anywhere; }
+.us-filtros { display: flex; flex-wrap: wrap; gap: 16px; align-items: end; }
+.us-filtros .us-campo { margin-bottom: 0; flex: 1 1 160px; }
+.us-paginacion { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin: 20px 0; }
+@media (max-width: 600px) { .us-modal { padding: 20px; } .us-tarjeta { padding: 18px; } .us-tabla th, .us-tabla td { padding: 10px; } }
+@media (max-width: 768px) {
+  /* La barra lateral común es sticky también en móvil: no debe tapar nuestros paneles al desplazar. */
+  .us-panel:not(.us-modal) { position: relative; z-index: 1; background: var(--negro, #060606); }
+  .us-panel:has(> .us-modal-fondo) { z-index: 200; }
+}

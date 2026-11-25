@@ -1,0 +1,24 @@
+# .gitignore
+
+# Dependencias y compilados del frontend
+node_modules/
+.vite/
+dist/
+
+# Python: entornos virtuales y caché
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Configuración local del editor (cada uno tiene la suya)
+.vscode/
+
+# Copias de las ramas de los servicios de antes de unirlas en main (python servicios.py limpiar las borra)
+infra/servicios/
+
+# Claves y credenciales: nunca a git (.env de cada servicio, de infra y del frontend, y la clave de Firebase)
+**/.env
+**/firebase-claves.json
+infra/secretos/*
+!infra/secretos/LEEME.md

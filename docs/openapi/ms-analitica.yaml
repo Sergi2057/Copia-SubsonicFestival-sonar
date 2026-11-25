@@ -1,0 +1,815 @@
+openapi: 3.0.3
+info:
+  title: Subsonic Festival - ms-analitica
+  version: 1.0.0
+  description: |
+    Microservicio **Estadísticas y recomendaciones** de la arquitectura de Subsonic Festival (Grupo GA02).
+    La visión global de la arquitectura está en la Memoria de la Práctica 1 (Practica1_Memoria_ASEE_GA02.pdf).
+
+    ## Responsabilidades
+    - Recoger todos los **eventos de dominio** del resto de servicios y las **interacciones** del front-end (vistas y búsquedas).
+    - **Estadísticas** para el panel de administración: ventas de entradas y merchandising, ingresos, ocupación de espacios, popularidad de artistas, asistencia real y previsión de afluencia por escenario.
+    - **Recomendaciones** para clientes (eventos y artistas, «mi escaleta»), visitantes (lo más popular) y proveedores (espacios).
+
+    ## Reglas de funcionamiento
+    - **No es propietario de datos de negocio**: todo lo que devuelve se puede reconstruir volviendo a procesar los eventos. Por eso puede caer o actualizarse sin afectar a la venta de entradas ni a la escaleta.
+    - Los consumidores son **idempotentes**: guardan el `id_evento` de cada mensaje procesado.
+    - Estadísticas cacheadas en Redis 60 s; recomendaciones cacheadas por usuario y recalculadas cuando cambian sus favoritos.
+    - Si el servicio no responde, el front-end muestra contenido por defecto (eventos destacados).
+
+    ## Almacenamiento
+    **MongoDB** (`analitica_db`) para eventos de estructura variable y documentos agregados que se leen sin joins, + **Redis** para cachear estadísticas (60 s) y recomendaciones.
+
+    | Colección | Contenido | Campos |
+    |---|---|---|
+    | eventos_dominio | Copia de todos los eventos recibidos (registro histórico; se archivan tras 2 años). | { id_evento, tipo, origen, fecha, datos } |
+    | interacciones | Acciones de visitantes y clientes en el front-end. | { sujeto: usuario_id \| sesion_id, accion: VER_EVENTO \| VER_ARTISTA \| BUSCAR, objetivo_id, fecha } |
+    | metricas_ventas | Ventas agregadas por evento, día y tipo de entrada. | { evento_id, fecha, tipo_pase, entradas, ingresos, cancelaciones } |
+    | metricas_ocupacion | Ocupación de espacios por evento y tipo. | { evento_id, tipo_espacio, total, alquilados, ingresos_alquiler } |
+    | metricas_tienda | Ventas de merchandising por producto, talla y día. | { producto_id, talla, fecha, unidades, ingresos, stock_restante } |
+    | popularidad_artistas | Favoritos y visitas por artista y evento. | { artista_id, evento_id, favoritos, visitas, tendencia_7d } |
+    | recomendaciones | Últimas recomendaciones calculadas por usuario. | { usuario_id, generadas_en, eventos: [...], artistas: [...], mi_escaleta: [...] } |
+    | procesados | Identificadores de eventos ya procesados (idempotencia). | { _id: id_evento, procesado_en } |
+
+    **Origen en la versión monolítica actual**: No hay tablas equivalentes: las estadísticas de la versión actual se calculaban con consultas sobre la base de datos compartida.
+
+    ## Cómo se calculan las recomendaciones
+    | Para | Método |
+    |---|---|
+    | Cliente: artistas y eventos | Por contenido (géneros de sus artistas favoritos) + colaborativo (artistas que marcan como favoritos los clientes con gustos parecidos). |
+    | Cliente: «mi escaleta» | Pases publicados de sus favoritos, ordenados por hora y con los solapamientos entre escenarios marcados. |
+    | Visitante | Popularidad: favoritos y visitas de los últimos 7 días. |
+    | Proveedor | Espacios de su tipo con mejor relación entre afluencia estimada, ocupación e ingresos de ediciones anteriores y precio. |
+    | Previsión de afluencia | Suma de favoritos de los artistas de cada slot, ajustada con la asistencia real (entradas validadas). |
+
+    ## Eventos que consume
+    | Evento | Uso |
+    |---|---|
+    | `usuarios.entrada.comprada` / `cancelada` / `validada` | Ventas, cancelaciones y asistencia real. |
+    | `usuarios.usuario.registrado` / `eliminado` | Registros; anonimización (RGPD). |
+    | `usuarios.favorito.anadido` / `eliminado` | Popularidad y recomendaciones. |
+    | `espacios.evento.*`, `espacios.espacio.*`, `espacios.alquiler.*` | Ocupación e ingresos de alquiler. |
+    | `escaleta.publicada`, `escaleta.pase.*`, `escaleta.artista.*` | Géneros de artistas, «mi escaleta» y afluencia. |
+    | `tienda.pedido.*`, `tienda.stock.bajo` | Ventas de merchandising y stock. |
+
+    No publica eventos: sus resultados se consultan por REST.
+
+    ## Flujo: recomendaciones personalizadas
+    ```text
+         Cliente         Gateway       ms-usuarios       Broker       ms-analitica
+            |               |               |               |               |
+            | 1. POST favoritos             |               |               |
+            |-------------->|               |               |               |
+            |               | 2. reenvía    |               |               |
+            |               |-------------->|               |               |
+            |               |               | 3. favorito.anadido           |
+            |               |               |~~~~~~~~~~~~~~>|               |
+            |               |               |               | 4. popularidad; marca
+            |               |               |               |~~~~~~~~~~~~~~>|
+            | 5. GET /recomendaciones/me    |               |               |
+            |-------------->|               |               |               |
+            |               | 6. rol = cliente              |               |
+            |               |---------------------------------------------->|
+            |               |               |               |               | 7. Redis o recalcula
+            | 8. 200 recomendaciones        |               |               |
+            |<--------------------------------------------------------------|
+            |               |               |               |               |
+    ```
+
+    `---` llamada síncrona (HTTP) · `~~~` mensaje asíncrono (evento)
+  contact:
+    name: Grupo GA02 - ASEE, Universidad de Extremadura
+servers:
+  - url: https://api.subsonicfestival.com/api/v1
+    description: Producción (a través del API Gateway)
+  - url: http://localhost:8000/api/v1
+    description: Desarrollo local
+tags:
+  - name: Estadísticas
+    description: Métricas para el panel de administración
+  - name: Recomendaciones
+    description: Recomendaciones personalizadas y populares
+  - name: Interacciones
+    description: Registro de la actividad de los usuarios en el front-end
+security:
+  - bearerAuth: []
+
+paths:
+  /estadisticas/resumen:
+    get:
+      tags: [Estadísticas]
+      summary: Indicadores principales del panel de administración
+      description: '**Rol:** admin.'
+      operationId: obtenerResumen
+      parameters:
+        - $ref: '#/components/parameters/EventoIdOpcional'
+      responses:
+        '200':
+          description: Resumen
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Resumen'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+
+  /estadisticas/ventas:
+    get:
+      tags: [Estadísticas]
+      summary: Ventas de entradas por evento, día y tipo
+      description: '**Rol:** admin.'
+      operationId: obtenerVentas
+      parameters:
+        - $ref: '#/components/parameters/EventoIdOpcional'
+        - $ref: '#/components/parameters/Desde'
+        - $ref: '#/components/parameters/Hasta'
+        - name: agrupar_por
+          in: query
+          schema:
+            type: string
+            enum: [DIA, SEMANA, TIPO_PASE]
+            default: DIA
+      responses:
+        '200':
+          description: Serie de ventas
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/MetricaVentas'
+        '400':
+          $ref: '#/components/responses/PeticionNoValida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+
+  /estadisticas/ocupacion:
+    get:
+      tags: [Estadísticas]
+      summary: Ocupación de espacios y alquileres
+      description: '**Rol:** admin.'
+      operationId: obtenerOcupacion
+      parameters:
+        - $ref: '#/components/parameters/EventoIdRequerido'
+      responses:
+        '200':
+          description: Ocupación por tipo de espacio
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/MetricaOcupacion'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+
+  /estadisticas/afluencia:
+    get:
+      tags: [Estadísticas]
+      summary: Previsión de afluencia por escenario y franja
+      description: |
+        Estimación basada en los favoritos de los artistas de cada slot y en la asistencia
+        real (entradas validadas). **Rol:** admin.
+      operationId: obtenerAfluencia
+      parameters:
+        - $ref: '#/components/parameters/EventoIdRequerido'
+        - name: fecha
+          in: query
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Previsión por escenario
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PrevisionAfluencia'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+
+  /estadisticas/tienda:
+    get:
+      tags: [Estadísticas]
+      summary: Ventas de merchandising
+      description: Ventas por producto y talla y productos con poco stock. **Rol:** admin.
+      operationId: obtenerEstadisticasTienda
+      parameters:
+        - $ref: '#/components/parameters/Desde'
+        - $ref: '#/components/parameters/Hasta'
+      responses:
+        '200':
+          description: Estadísticas de la tienda
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EstadisticasTienda'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+
+  /estadisticas/artistas-populares:
+    get:
+      tags: [Estadísticas]
+      summary: Ranking de artistas
+      description: Ordenados por favoritos y visitas. **Público.**
+      operationId: obtenerArtistasPopulares
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/EventoIdOpcional'
+        - name: limite
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 10
+      responses:
+        '200':
+          description: Ranking
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PopularidadArtista'
+
+  /recomendaciones/me:
+    get:
+      tags: [Recomendaciones]
+      summary: Recomendaciones personalizadas del cliente
+      description: |
+        Eventos y artistas recomendados según sus favoritos y los de clientes con gustos
+        parecidos, y «mi escaleta» con los pases de sus favoritos y los solapamientos
+        entre escenarios. **Rol:** cliente.
+      operationId: obtenerMisRecomendaciones
+      parameters:
+        - $ref: '#/components/parameters/EventoIdOpcional'
+      responses:
+        '200':
+          description: Recomendaciones
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecomendacionesCliente'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+
+  /recomendaciones/populares:
+    get:
+      tags: [Recomendaciones]
+      summary: Recomendaciones para visitantes
+      description: Lo más popular, sin personalizar. **Público.**
+      operationId: obtenerRecomendacionesPopulares
+      security: []
+      responses:
+        '200':
+          description: Recomendaciones populares
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecomendacionesPopulares'
+
+  /recomendaciones/espacios:
+    get:
+      tags: [Recomendaciones]
+      summary: Espacios recomendados para un proveedor
+      description: |
+        Según su tipo de servicio y el histórico de ocupación e ingresos de ediciones
+        anteriores. **Rol:** proveedor.
+      operationId: obtenerEspaciosRecomendados
+      parameters:
+        - $ref: '#/components/parameters/EventoIdOpcional'
+      responses:
+        '200':
+          description: Espacios recomendados
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/EspacioRecomendado'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+
+  /interacciones:
+    post:
+      tags: [Interacciones]
+      summary: Registrar interacciones del front-end (en lote)
+      description: |
+        El front-end acumula las interacciones y las envía en lote. Si hay token se asocian
+        al usuario; si no, al identificador anónimo de sesión. **Público.**
+      operationId: registrarInteracciones
+      security:
+        - {}
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [interacciones]
+              properties:
+                sesion_id:
+                  type: string
+                  format: uuid
+                  description: Identificador anónimo de sesión (visitantes)
+                  example: c4b3a291-8f7e-4d6c-b5a4-39281706f5e4
+                interacciones:
+                  description: Acciones registradas por el front-end desde el último envío (de 1 a 100).
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  items:
+                    $ref: '#/components/schemas/Interaccion'
+      responses:
+        '202':
+          description: Interacciones aceptadas (se procesan de forma asíncrona)
+        '400':
+          $ref: '#/components/responses/PeticionNoValida'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Token de Firebase Authentication. El rol va en el custom claim `rol`.
+
+  parameters:
+    EventoIdOpcional:
+      name: evento_id
+      in: query
+      required: false
+      schema:
+        type: string
+        example: evento-belgium
+    EventoIdRequerido:
+      name: evento_id
+      in: query
+      required: true
+      schema:
+        type: string
+        example: evento-belgium
+    Desde:
+      name: desde
+      in: query
+      schema:
+        type: string
+        format: date
+    Hasta:
+      name: hasta
+      in: query
+      schema:
+        type: string
+        format: date
+
+  responses:
+    PeticionNoValida:
+      description: Datos de entrada no válidos
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NoAutenticado:
+      description: Falta el token o no es válido
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    SinPermiso:
+      description: El rol del usuario no permite esta operación
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NoEncontrado:
+      description: No hay datos para ese evento
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    Error:
+      type: object
+      required: [codigo, mensaje]
+      properties:
+        codigo:
+          description: Código del error, estable y en mayúsculas, para que el cliente lo trate sin leer el mensaje.
+          type: string
+          example: SIN_DATOS
+        mensaje:
+          description: Explicación del error para mostrar al usuario.
+          type: string
+          example: No hay datos de ocupación para evento-brasil
+        detalles:
+          description: Información adicional, por ejemplo los parámetros no válidos.
+          type: object
+          additionalProperties: true
+          example: {desde: '2026-08-01', hasta: '2026-07-01'}
+        correlation_id:
+          description: Identificador de la petición, el mismo en los logs de todos los servicios que intervienen.
+          type: string
+          format: uuid
+          example: 9b2f6c1e-3d4a-4b5c-8d7e-1f2a3b4c5d6e
+
+    Resumen:
+      type: object
+      properties:
+        entradas_vendidas:
+          description: Entradas vendidas, descontadas las canceladas.
+          type: integer
+          example: 15688
+        ingresos_entradas:
+          description: Ingresos por venta de entradas, en euros.
+          type: number
+          format: float
+          example: 2431500
+        ingresos_alquileres:
+          description: Ingresos por alquiler de espacios a proveedores, en euros.
+          type: number
+          format: float
+          example: 184000
+        ingresos_tienda:
+          description: Ingresos de la tienda de merchandising, en euros.
+          type: number
+          format: float
+          example: 36250
+        usuarios_registrados:
+          description: Cuentas registradas (sin contar las borradas).
+          type: integer
+          example: 21430
+        ocupacion_espacios:
+          description: Fracción de espacios alquilables que están alquilados (0.82 = 82 %).
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          example: 0.82
+        asistentes_hoy:
+          type: integer
+          description: Entradas validadas hoy
+          example: 0
+        actualizado_en:
+          description: Cuándo se calcularon las cifras (se cachean 60 segundos).
+          type: string
+          format: date-time
+          example: "2026-07-18T16:00:00Z"
+
+    MetricaVentas:
+      type: object
+      properties:
+        evento_id:
+          description: Evento.
+          type: string
+          example: evento-belgium
+        periodo:
+          type: string
+          description: Fecha, semana o tipo de pase según agrupar_por
+          example: '2026-03-01'
+        tipo_pase:
+          description: Tipo de pase; solo cuando se agrupa por tipo de pase.
+          type: string
+          enum: [DAY, WEEKEND, VIP]
+          example: WEEKEND
+        entradas:
+          description: Entradas vendidas en el periodo.
+          type: integer
+          example: 412
+        ingresos:
+          description: Ingresos del periodo en euros.
+          type: number
+          format: float
+          example: 65920
+        cancelaciones:
+          description: Entradas canceladas en el periodo.
+          type: integer
+          example: 3
+
+    MetricaOcupacion:
+      type: object
+      properties:
+        evento_id:
+          description: Evento.
+          type: string
+          example: evento-belgium
+        tipo_espacio:
+          description: Tipo de espacio.
+          type: string
+          example: FOOD_BEVERAGE
+        total:
+          description: Espacios de ese tipo en el evento.
+          type: integer
+          example: 40
+        alquilados:
+          description: Espacios de ese tipo alquilados.
+          type: integer
+          example: 33
+        ingresos_alquiler:
+          description: Ingresos por sus alquileres en euros.
+          type: number
+          format: float
+          example: 49500
+
+    PrevisionAfluencia:
+      type: object
+      properties:
+        espacio_id:
+          description: Escenario (espacio de ms-espacios).
+          type: string
+          example: espacio-010
+        escenario:
+          description: Nombre del escenario.
+          type: string
+          example: Main Stage
+        franjas:
+          description: Previsión para cada actuación del escenario.
+          type: array
+          items:
+            type: object
+            properties:
+              inicio:
+                description: Inicio de la actuación.
+                type: string
+                format: date-time
+                example: "2026-07-18T22:00:00+02:00"
+              fin:
+                description: Fin de la actuación.
+                type: string
+                format: date-time
+                example: "2026-07-19T00:00:00+02:00"
+              artista:
+                description: Artista que actúa.
+                type: string
+                example: Armin van Buuren
+              asistentes_estimados:
+                description: Personas que se espera que acudan.
+                type: integer
+                example: 18500
+              porcentaje_aforo:
+                description: Asistentes estimados respecto al aforo del escenario (0.74 = 74 %).
+                type: number
+                format: float
+                example: 0.74
+
+    EstadisticasTienda:
+      type: object
+      properties:
+        ventas:
+          description: Ventas por producto y talla.
+          type: array
+          items:
+            type: object
+            properties:
+              producto_id:
+                description: Producto.
+                type: string
+                example: camiseta-2026
+              talla:
+                description: Talla.
+                type: string
+                example: M
+              unidades:
+                description: Unidades vendidas.
+                type: integer
+                example: 320
+              ingresos:
+                description: Ingresos en euros.
+                type: number
+                format: float
+                example: 8000
+        stock_bajo:
+          description: Tallas con stock por debajo del umbral (5 unidades).
+          type: array
+          items:
+            type: object
+            properties:
+              producto_id:
+                description: Producto.
+                type: string
+                example: sudadera-2026
+              talla:
+                description: Talla.
+                type: string
+                example: XL
+              stock:
+                description: Unidades que quedan.
+                type: integer
+                example: 2
+
+    PopularidadArtista:
+      type: object
+      properties:
+        artista_id:
+          description: Artista.
+          type: string
+          format: uuid
+          example: "22222222-2222-4222-8222-000000000001"
+        artista:
+          description: Nombre del artista.
+          type: string
+          example: Armin van Buuren
+        favoritos:
+          description: Clientes que lo tienen en favoritos.
+          type: integer
+          example: 5230
+        visitas:
+          description: Visitas a su ficha.
+          type: integer
+          example: 18740
+        tendencia_7d:
+          type: number
+          format: float
+          description: Variación en los últimos 7 días (0.15 = +15 %)
+          example: 0.15
+
+    EventoRecomendado:
+      type: object
+      properties:
+        evento_id:
+          description: Evento recomendado.
+          type: string
+          example: evento-belgium
+        titulo:
+          description: Nombre del evento.
+          type: string
+          example: Subsonic Belgium
+        puntuacion:
+          description: Grado de afinidad de 0 a 1; se ordena de mayor a menor.
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          example: 0.87
+        motivo:
+          description: Explicación que se muestra al usuario.
+          type: string
+          example: Actúan 3 de tus artistas favoritos
+
+    ArtistaRecomendado:
+      type: object
+      properties:
+        artista_id:
+          description: Artista recomendado.
+          type: string
+          format: uuid
+          example: "22222222-2222-4222-8222-000000000002"
+        artista:
+          description: Nombre del artista.
+          type: string
+          example: Tiësto
+        puntuacion:
+          description: Grado de afinidad de 0 a 1; se ordena de mayor a menor.
+          type: number
+          format: float
+          example: 0.79
+        motivo:
+          description: Explicación que se muestra al usuario.
+          type: string
+          example: Porque te gusta Armin van Buuren
+
+    PaseMiEscaleta:
+      type: object
+      properties:
+        pase_id:
+          description: Pase de un artista favorito.
+          type: string
+          format: uuid
+          example: 8d3c1b2a-6f5e-4d4c-9b3a-2e1f0a9b8c7d
+        artista:
+          description: Nombre del artista.
+          type: string
+          example: Armin van Buuren
+        escenario:
+          description: Nombre del escenario.
+          type: string
+          example: Main Stage
+        inicio:
+          description: Hora de inicio.
+          type: string
+          format: date-time
+          example: "2026-07-18T22:00:00+02:00"
+        fin:
+          description: Hora de fin.
+          type: string
+          format: date-time
+          example: "2026-07-19T00:00:00+02:00"
+        solapa_con:
+          type: array
+          description: Pases de otros favoritos que coinciden en horario
+          items:
+            type: string
+            format: uuid
+          example: [5f4e3d2c-1b0a-4987-a6b5-c4d3e2f1a0b9]
+
+    RecomendacionesCliente:
+      type: object
+      properties:
+        generadas_en:
+          description: Cuándo se calcularon (se recalculan cuando cambian sus favoritos).
+          type: string
+          format: date-time
+          example: "2026-07-10T09:00:00Z"
+        eventos:
+          description: Eventos recomendados.
+          type: array
+          items:
+            $ref: '#/components/schemas/EventoRecomendado'
+        artistas:
+          description: Artistas recomendados.
+          type: array
+          items:
+            $ref: '#/components/schemas/ArtistaRecomendado'
+        mi_escaleta:
+          description: Pases de sus artistas favoritos, ordenados por hora, con los solapamientos marcados.
+          type: array
+          items:
+            $ref: '#/components/schemas/PaseMiEscaleta'
+
+    RecomendacionesPopulares:
+      type: object
+      properties:
+        eventos:
+          description: Eventos más populares.
+          type: array
+          items:
+            $ref: '#/components/schemas/EventoRecomendado'
+        artistas:
+          description: Artistas más populares en los últimos 7 días.
+          type: array
+          items:
+            $ref: '#/components/schemas/PopularidadArtista'
+
+    EspacioRecomendado:
+      type: object
+      properties:
+        espacio_id:
+          description: Espacio recomendado.
+          type: string
+          example: espacio-001
+        evento_id:
+          description: Evento del espacio.
+          type: string
+          example: evento-belgium
+        tipo:
+          description: Tipo de espacio, el mismo que el servicio del proveedor.
+          type: string
+          example: FOOD_BEVERAGE
+        precio_alquiler:
+          description: Precio del alquiler en euros.
+          type: number
+          format: float
+          example: 1500
+        afluencia_estimada:
+          description: Personas que se espera que pasen por la zona.
+          type: integer
+          example: 12000
+        puntuacion:
+          description: Grado de interés de 0 a 1; se ordena de mayor a menor.
+          type: number
+          format: float
+          example: 0.91
+        motivo:
+          description: Explicación que se muestra al proveedor.
+          type: string
+          example: Zona con más paso de público en la edición anterior
+
+    Interaccion:
+      type: object
+      required: [accion, objetivo_id, fecha]
+      properties:
+        accion:
+          description: "Qué ha hecho el usuario: ver un evento, un artista o un producto, o buscar."
+          type: string
+          enum: [VER_EVENTO, VER_ARTISTA, VER_PRODUCTO, BUSCAR]
+          example: VER_ARTISTA
+        objetivo_id:
+          type: string
+          description: Id del evento, artista o producto, o el texto buscado
+          example: "22222222-2222-4222-8222-000000000001"
+        fecha:
+          description: Cuándo ocurrió, según el dispositivo.
+          type: string
+          format: date-time
+          example: "2026-07-02T19:14:05Z"

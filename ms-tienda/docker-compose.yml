@@ -1,0 +1,41 @@
+# Levanta ms-tienda con su propia base de datos PostgreSQL (tienda_db)
+#   docker compose up --build          -> API en http://localhost:8004/docs
+#   docker compose up -d tienda-db     -> solo la BD, para ejecutar la API con python main.py
+services:
+  tienda-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tienda
+      POSTGRES_PASSWORD: tienda
+      POSTGRES_DB: tienda_db
+    ports:
+      - "5434:5432"
+    volumes:
+      - tienda-datos:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tienda -d tienda_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  ms-tienda:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg://tienda:tienda@tienda-db:5432/tienda_db
+      RABBITMQ_URL: amqp://subsonic:subsonic@rabbitmq:5672/%2F
+    ports:
+      - "8004:8004"
+    networks:
+      - default
+      - subsonic
+    depends_on:
+      tienda-db:
+        condition: service_healthy
+
+volumes:
+  tienda-datos:
+
+# Red de infra (RabbitMQ). Arranca antes infra: cd ../infra && docker compose up -d
+networks:
+  subsonic:
+    external: true

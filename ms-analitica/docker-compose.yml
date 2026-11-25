@@ -1,0 +1,46 @@
+# Levanta ms-analitica con su MongoDB (analitica_db) y su caché Redis
+#   docker compose up --build                            -> API en http://localhost:8005/docs
+#   docker compose up -d analitica-mongo analitica-redis -> solo BD y caché, para ejecutar con python main.py
+services:
+  analitica-mongo:
+    image: mongo:7
+    ports:
+      - "27018:27017"
+    volumes:
+      - analitica-datos:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  analitica-redis:
+    image: redis:7-alpine
+    ports:
+      - "6381:6379"
+
+  ms-analitica:
+    build: .
+    environment:
+      MONGO_URL: mongodb://analitica-mongo:27017
+      MONGO_DB: analitica_db
+      REDIS_URL: redis://analitica-redis:6379/0
+      RABBITMQ_URL: amqp://subsonic:subsonic@rabbitmq:5672/%2F
+    ports:
+      - "8005:8005"
+    networks:
+      - default
+      - subsonic
+    depends_on:
+      analitica-mongo:
+        condition: service_healthy
+      analitica-redis:
+        condition: service_started
+
+volumes:
+  analitica-datos:
+
+# Red de infra (RabbitMQ). Arranca antes infra: cd ../infra && docker compose up -d
+networks:
+  subsonic:
+    external: true

@@ -1,0 +1,97 @@
+/* src/pages/Artista/Artista.css — Dueño: Sergio. Prefijo artista- (ficha del artista y reproductor) */
+.artista-pagina {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 120px 24px 60px;
+  min-height: 60vh;
+}
+
+.artista-cabecera {
+  display: flex;
+  gap: 32px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.artista-foto {
+  width: 200px;
+  height: 200px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.artista-iniciales {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  min-height: 120px;
+  background: linear-gradient(135deg, var(--rojo, #bc0850), #3a0a24);
+  color: #fff;
+  font-size: 48px;
+  font-weight: 800;
+  letter-spacing: 2px;
+}
+
+.artista-iniciales.artista-foto { font-size: 64px; }
+.player-cover-large .artista-iniciales { width: 180px; height: 180px; border-radius: 8px; }
+.music-artist-card .artista-iniciales { height: 100%; font-size: 36px; }
+
+.artista-datos { display: flex; flex-direction: column; gap: 12px; align-items: flex-start; }
+.artista-nombre { margin: 0; font-size: 48px; line-height: 1.1; color: #fff; }
+.artista-pais { margin: 0; color: var(--apagado, #999); }
+
+.artista-biografia {
+  margin: 32px 0 0;
+  max-width: 800px;
+  line-height: 1.7;
+  color: #ddd;
+}
+
+.artista-redes {
+  display: flex;
+  gap: 16px;
+  list-style: none;
+  padding: 0;
+  margin: 16px 0 0;
+  text-transform: capitalize;
+}
+
+.artista-redes a { color: var(--rojo, #bc0850); }
+
+.artista-bloque { margin-top: 48px; }
+.artista-bloque h2 { margin-bottom: 16px; }
+
+.artista-pases { list-style: none; padding: 0; margin: 0; }
+.artista-pases li {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr auto;
+  gap: 16px;
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.artista-pase-fecha { color: #fff; font-weight: 600; text-transform: capitalize; }
+.artista-pase-estado { color: var(--apagado, #999); font-size: 13px; }
+.artista-pase-cancelado span:not(.artista-pase-estado) { text-decoration: line-through; opacity: 0.6; }
+
+.artista-error { color: #ff6b8b; }
+
+.artista-iframe { border: 0; border-radius: 12px; }
+
+/* Las pistas son botones (accesibles con teclado) con el aspecto de playlist-item */
+.artista-pista {
+  width: 100%;
+  border: none;
+  background: transparent;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+@media (max-width: 700px) {
+  .artista-nombre { font-size: 34px; }
+  .artista-pases li { grid-template-columns: 1fr; gap: 4px; }
+}

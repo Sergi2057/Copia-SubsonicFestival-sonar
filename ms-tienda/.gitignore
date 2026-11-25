@@ -1,0 +1,3 @@
+# Configuración local: no subir nunca
+.env
+.pytest_cache/

@@ -1,0 +1,41 @@
+# Levanta ms-espacios con su propia base de datos PostgreSQL (espacios_db)
+#   docker compose up --build          -> API en http://localhost:8002/docs
+#   docker compose up -d espacios-db   -> solo la BD, para ejecutar la API con python main.py
+services:
+  espacios-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: espacios
+      POSTGRES_PASSWORD: espacios
+      POSTGRES_DB: espacios_db
+    ports:
+      - "5436:5432"
+    volumes:
+      - espacios-datos:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U espacios -d espacios_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  ms-espacios:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg://espacios:espacios@espacios-db:5432/espacios_db
+      TOKEN_SERVICIO: token-servicio-dev
+      RABBITMQ_URL: amqp://subsonic:subsonic@rabbitmq:5672/%2F
+    ports:
+      - "8002:8002"
+    networks:
+      - default
+      - subsonic
+    depends_on:
+      espacios-db:
+        condition: service_healthy
+
+volumes:
+  espacios-datos:
+
+networks:
+  subsonic:
+    external: true

@@ -1,0 +1,76 @@
+/* src/pages/Evento/CartelEvento.css — Dueño: Sergio. Prefijo cartel- */
+.cartel-subtabs { justify-content: center; margin-bottom: 16px; }
+
+.cartel-directo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--apagado, #999);
+  font-size: 13px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.cartel-punto {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--rojo, #bc0850);
+  animation: cartel-latido 1.6s ease-in-out infinite;
+}
+
+@keyframes cartel-latido {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+.cartel-aviso {
+  margin: 12px auto;
+  max-width: 720px;
+  padding: 10px 16px;
+  border-left: 3px solid var(--rojo, #bc0850);
+  background: rgba(188, 8, 80, 0.12);
+  color: #fff;
+  border-radius: 4px;
+  text-align: center;
+}
+
+.cartel-error {
+  margin: 12px auto;
+  max-width: 720px;
+  color: #ff6b8b;
+  text-align: center;
+}
+
+.cartel-artista { color: inherit; text-decoration: none; }
+.cartel-artista:hover { color: var(--rojo, #bc0850); }
+
+.cartel-dia { margin-bottom: 28px; }
+.cartel-dia-titulo {
+  text-transform: capitalize;
+  margin: 0 0 12px;
+  color: #fff;
+}
+
+.horario-artista a { color: inherit; text-decoration: none; }
+.horario-artista a:hover { color: var(--rojo, #bc0850); }
+
+.cartel-estado {
+  margin-left: 10px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.1);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.cartel-cancelado .horario-artista strong,
+.cartel-cancelado .horario-hora { text-decoration: line-through; opacity: 0.6; }
+
+.cartel-cambiado { animation: cartel-resalte 3s ease-out; }
+
+@keyframes cartel-resalte {
+  from { background: rgba(188, 8, 80, 0.35); }
+  to { background: transparent; }
+}

@@ -1,0 +1,865 @@
+openapi: 3.0.3
+info:
+  title: Subsonic Festival - ms-tienda
+  version: 1.0.0
+  description: |
+    Microservicio **Tienda de merchandising** de la arquitectura de Subsonic Festival (Grupo GA02).
+    La visión global de la arquitectura está en la Memoria de la Práctica 1 (Practica1_Memoria_ASEE_GA02.pdf).
+
+    Es la evolución de la tienda ya implementada en la versión monolítica
+    (`GET /api/merchandising` y `POST /api/merchandising/comprar`), que pasa a los recursos
+    `productos` y `pedidos`.
+
+    ## Responsabilidades
+    - **Catálogo** de productos (nombre, descripción, precio, imagen) y sus **variantes** (talla) con el stock de cada una.
+    - **Pedidos**: descuento de stock, cobro por la pasarela de pago y registro del pedido (hoy no se guardan).
+    - **Entrega** a domicilio o recogida en el puesto oficial de merchandising de un evento.
+    - Gestión del estado de los pedidos y reposición de stock.
+
+    ## Actores
+    | Actor | Qué hace en este servicio |
+    |---|---|
+    | Visitante | Consulta el catálogo. |
+    | Cliente | Compra (solo clientes registrados, como en la versión actual) y consulta sus pedidos. |
+    | Administrador | Gestiona productos, tallas, stock y el estado de los pedidos. |
+
+    ## Reglas de negocio
+    - El stock de cada talla se descuenta en una transacción con bloqueo de fila, así que no se venden más unidades de las disponibles (`409` si no hay stock).
+    - Si el pago falla se devuelve el stock y se responde `402`.
+    - Cuando el stock de una talla baja del umbral (5 unidades) se publica `tienda.stock.bajo`.
+    - Retirar un producto lo marca como inactivo: desaparece del catálogo, pero los pedidos antiguos lo siguen mostrando.
+    - Una talla que nunca se ha vendido se borra. Si ya aparece en algún pedido se retira (`activa = false`), igual que un producto. No se puede eliminar mientras tenga pedidos pendientes de entregar (`409`).
+    - Cada producto tiene como mucho una variante por talla (`409` al crear o cambiar una talla repetida). Añadir una talla retirada la reactiva en lugar de crear otra.
+    - No se guardan datos de tarjeta, solo la referencia del pago.
+
+    ## Almacenamiento
+    **PostgreSQL** (`tienda_db`). El stock se descuenta en transacciones con bloqueo de fila (`SELECT … FOR UPDATE`).
+
+    **productos**: catálogo (tabla «productos» de la versión actual)
+
+    | Campo | Tipo | Descripción |
+    |---|---|---|
+    | id | VARCHAR(50) (PK) | Identificador legible del producto (se conserva el `id_producto` actual). |
+    | nombre / descripcion | VARCHAR / TEXT | P. ej. «Camiseta Subsonic 2026». |
+    | precio | NUMERIC(8,2) | Precio de venta. |
+    | imagen_url | VARCHAR(500) | Imagen del producto. |
+    | evento_id | VARCHAR(100) NULL | Si es merchandising exclusivo de una edición (referencia a ms-espacios). |
+    | activo | BOOLEAN | Si se muestra en el catálogo. |
+
+    **variantes**: tallas y stock de cada producto
+
+    | Campo | Tipo | Descripción |
+    |---|---|---|
+    | id | UUID (PK) | Identificador de la variante. |
+    | producto_id | VARCHAR(50) (FK productos) | Producto. |
+    | talla | VARCHAR(10) | XS, S, M, L, XL, XXL o UNICA (hoy la talla solo se elige en el front-end y no afecta al stock). |
+    | stock | INTEGER CHECK (stock >= 0) | Unidades disponibles. |
+    | activa | BOOLEAN | Si la talla se puede comprar. Una talla ya vendida se retira en lugar de borrarse. |
+
+    **pedidos**: compras de merchandising
+
+    | Campo | Tipo | Descripción |
+    |---|---|---|
+    | id | VARCHAR(50) (PK) | Identificador legible, p. ej. `pedido-7f3c21ab`. |
+    | usuario_id | VARCHAR(128) | Cliente (referencia a ms-usuarios). |
+    | importe_total | NUMERIC(10,2) | Total cobrado. |
+    | entrega | VARCHAR(20) | DOMICILIO o RECOGIDA_EVENTO. |
+    | direccion_envio / evento_id_recogida | TEXT / VARCHAR(100) | Dirección de envío o evento donde se recoge. |
+    | estado | VARCHAR(20) | PAGADO, PREPARADO, ENVIADO, LISTO_RECOGIDA, ENTREGADO o CANCELADO. |
+    | pago_ref | VARCHAR(100) | Referencia devuelta por la pasarela de pago. |
+    | creado_en | TIMESTAMPTZ | Fecha del pedido. |
+
+    **lineas_pedido**: productos de cada pedido
+
+    | Campo | Tipo | Descripción |
+    |---|---|---|
+    | pedido_id | VARCHAR(50) (PK, FK pedidos) | Pedido. |
+    | variante_id | UUID (PK, FK variantes) | Producto y talla. |
+    | cantidad | INTEGER | Unidades. |
+    | precio_unitario | NUMERIC(8,2) | Precio en el momento de la compra. |
+
+    **Origen en la versión monolítica actual**: La tabla `productos`: el stock pasa a la tabla `variantes` (uno por talla) y se añaden `pedidos` y `lineas_pedido`, que hoy no se guardan.
+
+    ## Estados de un pedido
+    ```text
+    PAGADO --> PREPARADO --> ENVIADO ---------> ENTREGADO
+      |              \
+      |               +--> LISTO_RECOGIDA --> ENTREGADO
+      +--(cliente)--> CANCELADO
+    ```
+
+    ## Eventos que publica
+    | Evento | Lo consumen |
+    |---|---|
+    | `tienda.pedido.creado` | ms-usuarios (email de confirmación), ms-analitica |
+    | `tienda.pedido.actualizado` | ms-usuarios (aviso de envío o recogida), ms-analitica |
+    | `tienda.stock.bajo` | ms-usuarios (aviso a administradores), ms-analitica |
+
+    ## Eventos que consume
+    | Evento | Reacción |
+    |---|---|
+    | `espacios.evento.publicado` / `cancelado` | Habilita o deshabilita el evento como punto de recogida. |
+    | `usuarios.usuario.eliminado` | Anonimiza los pedidos del cliente (RGPD). |
+
+    ## Flujo: pedido de merchandising
+    ```text
+         Cliente         Gateway        ms-tienda       Pasarela         Broker        ms-usuarios
+            |               |               |               |               |               |
+            | 1. POST /pedidos              |               |               |               |
+            |-------------->|               |               |               |               |
+            |               | 2. rol = cliente              |               |               |
+            |               |-------------->|               |               |               |
+            |               |               | 3. bloquea variantes, descuenta stock
+            |               |               | 4. cobro(token_pago)          |               |
+            |               |               |-------------->|               |               |
+            |               |               | 5. pago OK    |               |               |
+            |               |               |<--------------|               |               |
+            |               |               | 6. guarda pedido PAGADO
+            |               |               | 7. pedido.creado              |               |
+            |               |               |~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~>|               |
+            |               |               |               |               | 8. email confirmación
+            |               |               |               |               |~~~~~~~~~~~~~~>|
+            | 9. 201 pedido |               |               |               |               |
+            |<------------------------------|               |               |               |
+            |               |               |               |               |               |
+    ```
+
+    `---` llamada síncrona (HTTP) · `~~~` mensaje asíncrono (evento)
+  contact:
+    name: Grupo GA02 - ASEE, Universidad de Extremadura
+servers:
+  - url: https://api.subsonicfestival.com/api/v1
+    description: Producción (a través del API Gateway)
+  - url: http://localhost:8000/api/v1
+    description: Desarrollo local
+tags:
+  - name: Productos
+    description: Catálogo de merchandising
+  - name: Pedidos
+    description: Compras de merchandising
+security:
+  - bearerAuth: []
+
+paths:
+  /productos:
+    get:
+      tags: [Productos]
+      summary: Catálogo de productos
+      description: Solo productos activos para visitantes y clientes. **Público.**
+      operationId: listarProductos
+      security: []
+      parameters:
+        - name: evento_id
+          in: query
+          description: Incluir el merchandising exclusivo de este evento
+          schema:
+            type: string
+            example: evento-belgium
+        - name: disponible
+          in: query
+          description: Solo productos con stock en alguna talla
+          schema:
+            type: boolean
+        - $ref: '#/components/parameters/Limite'
+        - $ref: '#/components/parameters/Desplazamiento'
+      responses:
+        '200':
+          description: Productos
+          headers:
+            X-Total-Count:
+              $ref: '#/components/headers/XTotalCount'
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Producto'
+    post:
+      tags: [Productos]
+      summary: Crear un producto
+      description: '**Rol:** admin.'
+      operationId: crearProducto
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProductoEntrada'
+      responses:
+        '201':
+          description: Producto creado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Producto'
+        '400':
+          $ref: '#/components/responses/PeticionNoValida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '409':
+          description: Ya existe un producto con ese identificador
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /productos/{producto_id}:
+    parameters:
+      - $ref: '#/components/parameters/ProductoId'
+    get:
+      tags: [Productos]
+      summary: Obtener un producto
+      description: Incluye sus variantes y el stock de cada una. **Público.**
+      operationId: obtenerProducto
+      security: []
+      responses:
+        '200':
+          description: Producto
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Producto'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    put:
+      tags: [Productos]
+      summary: Modificar un producto
+      description: '**Rol:** admin.'
+      operationId: modificarProducto
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProductoEntrada'
+      responses:
+        '200':
+          description: Producto modificado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Producto'
+        '400':
+          $ref: '#/components/responses/PeticionNoValida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    delete:
+      tags: [Productos]
+      summary: Retirar un producto del catálogo
+      description: Se marca como inactivo; los pedidos antiguos lo siguen mostrando. **Rol:** admin.
+      operationId: eliminarProducto
+      responses:
+        '204':
+          description: Producto retirado
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+
+  /productos/{producto_id}/variantes:
+    parameters:
+      - $ref: '#/components/parameters/ProductoId'
+    post:
+      tags: [Productos]
+      summary: Añadir una talla a un producto
+      description: |
+        Si el producto tenía esa talla pero estaba retirada (`activa = false`), se reactiva con el
+        stock nuevo y se responde `201` con el mismo `id`, así conserva su historial de pedidos.
+        **Rol:** admin.
+      operationId: crearVariante
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [talla, stock]
+              properties:
+                talla:
+                  $ref: '#/components/schemas/Talla'
+                stock:
+                  description: Unidades iniciales de la talla.
+                  type: integer
+                  minimum: 0
+                  example: 50
+      responses:
+        '201':
+          description: Variante creada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Variante'
+        '400':
+          $ref: '#/components/responses/PeticionNoValida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          description: El producto ya tiene esa talla y está activa
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /productos/{producto_id}/variantes/{variante_id}:
+    parameters:
+      - $ref: '#/components/parameters/ProductoId'
+      - name: variante_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    patch:
+      tags: [Productos]
+      summary: Modificar una talla (talla o stock)
+      description: |
+        Cambia la talla, el stock o ambos; los campos que no se envían no cambian.
+        Si el stock queda por debajo del umbral se publica `tienda.stock.bajo`. **Rol:** admin.
+      operationId: modificarVariante
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                talla:
+                  $ref: '#/components/schemas/Talla'
+                stock:
+                  description: Nuevo stock de la talla (valor absoluto, no una suma).
+                  type: integer
+                  minimum: 0
+                  example: 30
+            example:
+              talla: XL
+              stock: 30
+      responses:
+        '200':
+          description: Variante modificada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Variante'
+        '400':
+          $ref: '#/components/responses/PeticionNoValida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          description: El producto ya tiene otra variante con esa talla
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags: [Productos]
+      summary: Eliminar una talla de un producto
+      description: |
+        Si la talla no aparece en ningún pedido se borra. Si ya se ha vendido, se retira
+        (`activa = false`): deja de mostrarse en el catálogo y no se puede comprar, pero los
+        pedidos antiguos la siguen mostrando. **Rol:** admin.
+      operationId: eliminarVariante
+      responses:
+        '204':
+          description: Variante eliminada o retirada
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          description: La talla tiene pedidos pendientes de entregar
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /pedidos:
+    get:
+      tags: [Pedidos]
+      summary: Listar pedidos
+      description: |
+        Un **cliente** recibe solo sus pedidos. Un **admin** recibe todos y puede filtrar.
+        **Rol:** cliente o admin.
+      operationId: listarPedidos
+      parameters:
+        - name: estado
+          in: query
+          schema:
+            $ref: '#/components/schemas/EstadoPedido'
+        - name: evento_id_recogida
+          in: query
+          description: Pedidos que se recogen en un evento (solo admin)
+          schema:
+            type: string
+        - $ref: '#/components/parameters/Limite'
+        - $ref: '#/components/parameters/Desplazamiento'
+      responses:
+        '200':
+          description: Pedidos
+          headers:
+            X-Total-Count:
+              $ref: '#/components/headers/XTotalCount'
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Pedido'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+    post:
+      tags: [Pedidos]
+      summary: Realizar un pedido
+      description: |
+        Descuenta el stock de cada línea, cobra el importe en la pasarela y registra el pedido
+        como PAGADO. Si el pago falla se devuelve el stock. Publica `tienda.pedido.creado`.
+        Sustituye a `POST /api/merchandising/comprar` de la versión actual. **Rol:** cliente.
+      operationId: crearPedido
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PedidoEntrada'
+            example:
+              lineas:
+                - variante_id: 3f1c9a2e-6b7d-4e8f-9a0b-1c2d3e4f5a6b
+                  cantidad: 2
+              entrega: RECOGIDA_EVENTO
+              evento_id_recogida: evento-belgium
+              token_pago: tok_1PzQx2Lk
+      responses:
+        '201':
+          description: Pedido realizado
+          headers:
+            Location:
+              schema:
+                type: string
+                example: /api/v1/pedidos/pedido-7f3c21ab
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pedido'
+        '400':
+          $ref: '#/components/responses/PeticionNoValida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '402':
+          description: Pago rechazado por la pasarela
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Solo los clientes registrados pueden comprar
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: No hay stock suficiente de alguna talla
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /pedidos/{pedido_id}:
+    parameters:
+      - name: pedido_id
+        in: path
+        required: true
+        schema:
+          type: string
+          example: pedido-7f3c21ab
+    get:
+      tags: [Pedidos]
+      summary: Obtener un pedido
+      description: '**Rol:** el cliente del pedido o admin.'
+      operationId: obtenerPedido
+      responses:
+        '200':
+          description: Pedido
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pedido'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    patch:
+      tags: [Pedidos]
+      summary: Cambiar el estado de un pedido
+      description: |
+        - **admin**: PAGADO → PREPARADO → ENVIADO / LISTO_RECOGIDA → ENTREGADO.
+        - **cliente**: PAGADO → CANCELADO (se reembolsa y se devuelve el stock).
+
+        Publica `tienda.pedido.actualizado`.
+      operationId: cambiarEstadoPedido
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [estado]
+              properties:
+                estado:
+                  $ref: '#/components/schemas/EstadoPedido'
+      responses:
+        '200':
+          description: Pedido actualizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pedido'
+        '400':
+          $ref: '#/components/responses/PeticionNoValida'
+        '401':
+          $ref: '#/components/responses/NoAutenticado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          description: Transición de estado no permitida
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Token de Firebase Authentication. El rol va en el custom claim `rol`.
+
+  parameters:
+    ProductoId:
+      name: producto_id
+      in: path
+      required: true
+      schema:
+        type: string
+        example: camiseta-2026
+    Limite:
+      name: limite
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    Desplazamiento:
+      name: desplazamiento
+      in: query
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+
+  headers:
+    XTotalCount:
+      description: Número total de resultados sin paginar
+      schema:
+        type: integer
+
+  responses:
+    PeticionNoValida:
+      description: Datos de entrada no válidos
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NoAutenticado:
+      description: Falta el token o no es válido
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    SinPermiso:
+      description: El rol del usuario no permite esta operación
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NoEncontrado:
+      description: El recurso no existe
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    Error:
+      type: object
+      required: [codigo, mensaje]
+      properties:
+        codigo:
+          description: Código del error, estable y en mayúsculas, para que el cliente lo trate sin leer el mensaje.
+          type: string
+          example: SIN_STOCK
+        mensaje:
+          description: Explicación del error para mostrar al usuario.
+          type: string
+          example: No hay stock suficiente de la talla M
+        detalles:
+          description: Información adicional, por ejemplo los campos no válidos.
+          type: object
+          additionalProperties: true
+          example: {talla: M, disponible: 1, solicitado: 2}
+        correlation_id:
+          description: Identificador de la petición, el mismo en los logs de todos los servicios que intervienen.
+          type: string
+          format: uuid
+          example: 9b2f6c1e-3d4a-4b5c-8d7e-1f2a3b4c5d6e
+
+    Talla:
+      description: Talla de una prenda. UNICA para productos sin tallas (gorras, tazas…).
+      type: string
+      enum: [XS, S, M, L, XL, XXL, UNICA]
+
+    Variante:
+      type: object
+      properties:
+        id:
+          description: Identificador de la variante.
+          type: string
+          format: uuid
+          example: 3f1c9a2e-6b7d-4e8f-9a0b-1c2d3e4f5a6b
+        talla:
+          $ref: '#/components/schemas/Talla'
+        stock:
+          description: Unidades disponibles de esta talla.
+          type: integer
+          minimum: 0
+          example: 42
+        activa:
+          description: Si la talla se puede comprar. Es false cuando se ha retirado.
+          type: boolean
+          example: true
+
+    Producto:
+      type: object
+      required: [id, nombre, precio]
+      properties:
+        id:
+          description: Identificador legible del producto.
+          type: string
+          example: camiseta-2026
+        nombre:
+          description: Nombre que se muestra en el catálogo.
+          type: string
+          example: Camiseta Subsonic 2026
+        descripcion:
+          description: Descripción del producto.
+          type: string
+          example: Camiseta oficial de algodón orgánico con el cartel de 2026.
+        precio:
+          description: Precio de venta en euros, IVA incluido.
+          type: number
+          format: float
+          example: 25
+        imagen_url:
+          description: Ruta o URL de la imagen del producto.
+          type: string
+          example: /camiseta.jpg
+        evento_id:
+          type: string
+          nullable: true
+          description: Si es merchandising exclusivo de una edición
+          example: evento-belgium
+        activo:
+          description: Si aparece en el catálogo. Es false cuando el producto se ha retirado.
+          type: boolean
+          example: true
+        variantes:
+          description: Tallas del producto con el stock de cada una.
+          type: array
+          items:
+            $ref: '#/components/schemas/Variante'
+
+    ProductoEntrada:
+      type: object
+      required: [id, nombre, precio]
+      properties:
+        id:
+          description: "Identificador legible: minúsculas, números y guiones. No se puede cambiar después."
+          type: string
+          pattern: '^[a-z0-9-]+$'
+          example: camiseta-2026
+        nombre:
+          description: Nombre que se muestra en el catálogo.
+          type: string
+          example: Camiseta Subsonic 2026
+        descripcion:
+          description: Descripción del producto.
+          type: string
+          example: Camiseta oficial de algodón orgánico con el cartel de 2026.
+        precio:
+          description: Precio de venta en euros, IVA incluido.
+          type: number
+          format: float
+          minimum: 0
+          example: 25
+        imagen_url:
+          description: Ruta o URL de la imagen del producto.
+          type: string
+          example: /camiseta.jpg
+        evento_id:
+          description: Evento del que es merchandising exclusivo; null si se vende en todas las ediciones.
+          type: string
+          nullable: true
+          example: evento-belgium
+        activo:
+          description: Si aparece en el catálogo.
+          type: boolean
+          default: true
+          example: true
+
+    Entrega:
+      description: "Forma de entrega: envío a la dirección del cliente o recogida en el puesto de merchandising de un evento."
+      type: string
+      enum: [DOMICILIO, RECOGIDA_EVENTO]
+
+    EstadoPedido:
+      description: Estado del pedido. Las transiciones permitidas están en la descripción del servicio.
+      type: string
+      enum: [PAGADO, PREPARADO, ENVIADO, LISTO_RECOGIDA, ENTREGADO, CANCELADO]
+
+    LineaPedidoEntrada:
+      type: object
+      required: [variante_id, cantidad]
+      properties:
+        variante_id:
+          description: Variante (producto y talla) que se compra.
+          type: string
+          format: uuid
+          example: 3f1c9a2e-6b7d-4e8f-9a0b-1c2d3e4f5a6b
+        cantidad:
+          description: Unidades de esa variante (máximo 10 por línea).
+          type: integer
+          minimum: 1
+          maximum: 10
+          example: 2
+
+    PedidoEntrada:
+      type: object
+      required: [lineas, entrega, token_pago]
+      properties:
+        lineas:
+          description: Productos del pedido. Cada variante aparece una sola vez.
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/LineaPedidoEntrada'
+        entrega:
+          $ref: '#/components/schemas/Entrega'
+        direccion_envio:
+          type: string
+          description: Obligatoria si entrega = DOMICILIO
+          example: Calle Mayor 12, 2.º B, 10003 Cáceres
+        evento_id_recogida:
+          type: string
+          description: Obligatorio si entrega = RECOGIDA_EVENTO
+          example: evento-belgium
+        token_pago:
+          type: string
+          description: Token de pago generado por la pasarela en el front-end
+          example: tok_1PzQx2Lk
+
+    LineaPedido:
+      type: object
+      properties:
+        producto_id:
+          description: Producto comprado.
+          type: string
+          example: camiseta-2026
+        producto_nombre:
+          description: Nombre del producto en el momento de la compra.
+          type: string
+          example: Camiseta Subsonic 2026
+        variante_id:
+          description: Variante (talla) comprada.
+          type: string
+          format: uuid
+          example: 3f1c9a2e-6b7d-4e8f-9a0b-1c2d3e4f5a6b
+        talla:
+          $ref: '#/components/schemas/Talla'
+        cantidad:
+          description: Unidades compradas.
+          type: integer
+          example: 2
+        precio_unitario:
+          description: Precio por unidad en el momento de la compra, aunque el producto cambie de precio después.
+          type: number
+          format: float
+          example: 25
+
+    Pedido:
+      type: object
+      properties:
+        id:
+          description: Identificador legible del pedido.
+          type: string
+          example: pedido-7f3c21ab
+        usuario_id:
+          description: Cliente que hizo el pedido (UID de Firebase). Se anonimiza si el cliente borra su cuenta.
+          type: string
+          example: uid-cliente-david
+        lineas:
+          description: Productos del pedido.
+          type: array
+          items:
+            $ref: '#/components/schemas/LineaPedido'
+        importe_total:
+          description: Total cobrado en euros.
+          type: number
+          format: float
+          example: 50
+        entrega:
+          $ref: '#/components/schemas/Entrega'
+        direccion_envio:
+          description: Dirección de envío si la entrega es DOMICILIO; null en otro caso.
+          type: string
+          nullable: true
+          example: Calle Mayor 12, 2.º B, 10003 Cáceres
+        evento_id_recogida:
+          description: Evento donde se recoge si la entrega es RECOGIDA_EVENTO; null en otro caso.
+          type: string
+          nullable: true
+        estado:
+          $ref: '#/components/schemas/EstadoPedido'
+        pago_ref:
+          description: Referencia del cobro devuelta por la pasarela de pago, para reembolsos y reclamaciones.
+          type: string
+          example: pi_3PzQx2LkdIwHu7ix0abc
+        creado_en:
+          description: Fecha y hora del pedido.
+          type: string
+          format: date-time
+          example: "2026-06-12T18:30:00Z"

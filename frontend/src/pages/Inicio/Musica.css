@@ -1,0 +1,18 @@
+/* src/pages/Inicio/Musica.css — Dueño: Sergio. Prefijo musica- */
+.musica-buscar {
+  display: block;
+  width: 100%;
+  max-width: 420px;
+  margin: 0 auto 24px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid #444;
+  background: #181818;
+  color: #fff;
+  font: inherit;
+}
+
+/* Las tarjetas de artista son botones (accesibles con teclado) con el aspecto de music-artist-card */
+.musica-tarjeta { padding: 0; background: none; font: inherit; color: inherit; }
+
+.musica-ficha { text-align: center; margin-top: 24px; }

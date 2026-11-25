@@ -1,0 +1,179 @@
+/* src/pages/Tienda/Tienda.css — Dueño: Sergio. Prefijo tienda- (y las clases del monolito producto-*) */
+
+/* ── SECCIÓN TIENDA ── */
+.tienda-pagina { padding-top: 40px; min-height: 60vh; }
+
+.tienda-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 32px;
+  margin-top: 24px;
+}
+
+.producto-card {
+  background: var(--gris2);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 8px;
+  overflow: hidden;
+  transition: transform 0.3s ease;
+}
+
+.producto-card:hover {
+  transform: translateY(-10px);
+  border-color: var(--rojo);
+}
+
+.producto-card img {
+  width: 100%;
+  height: 300px;
+  object-fit: cover;
+}
+
+.producto-info {
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  text-align: center;
+}
+
+.producto-info span {
+  font-size: 16px;
+  font-weight: 500;
+  color: #fff;
+}
+
+.producto-info strong {
+  font-size: 22px;
+  color: var(--rojo);
+}
+
+/* ── Filtro, carrito y pago ── */
+.tienda-filtro { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 24px; }
+
+.tienda-filtro select,
+.tienda-pago select,
+.tienda-pago textarea,
+.tienda-modal select {
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid #444;
+  background: #181818;
+  color: #fff;
+  font: inherit;
+}
+
+.tienda-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 32px;
+  align-items: start;
+}
+
+.tienda-carrito {
+  position: sticky;
+  top: 100px;
+  margin-top: 24px;
+  padding: 24px;
+  background: var(--gris2);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 8px;
+}
+
+.tienda-carrito h3 { margin-top: 0; }
+
+.tienda-lineas { list-style: none; padding: 0; margin: 0 0 12px; }
+.tienda-lineas li {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  font-size: 14px;
+}
+
+.tienda-quitar,
+.tienda-cerrar {
+  background: none;
+  border: none;
+  color: var(--apagado, #999);
+  font-size: 20px;
+  cursor: pointer;
+}
+
+.tienda-quitar:hover,
+.tienda-cerrar:hover { color: var(--rojo); }
+
+.tienda-total { display: flex; justify-content: space-between; font-size: 18px; }
+.tienda-total strong { color: var(--rojo); }
+
+.tienda-pago { display: flex; flex-direction: column; gap: 12px; }
+.tienda-pago fieldset { border: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
+.tienda-pago label { display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
+.tienda-pago fieldset label { flex-direction: row; align-items: center; }
+
+.tienda-nota { font-size: 12px; color: var(--apagado, #999); margin: 0; }
+.tienda-aviso { color: #ffb347; font-size: 14px; }
+.tienda-error { color: #ff6b8b; }
+.tienda-ok {
+  padding: 10px 12px;
+  border-left: 3px solid #3ecf8e;
+  background: rgba(62, 207, 142, 0.1);
+  font-size: 14px;
+}
+.tienda-ok a { color: #3ecf8e; }
+
+.tienda-exclusivo { color: #ffb347; text-transform: uppercase; letter-spacing: 1px; font-size: 11px; }
+
+/* ── Ficha de producto (ventana) ── */
+.tienda-fondo {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.75);
+}
+
+.tienda-modal {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  max-width: 760px;
+  width: 100%;
+  max-height: 90vh;
+  overflow: auto;
+  background: var(--gris2, #1a1a1a);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 12px;
+}
+
+.tienda-cerrar { position: absolute; top: 8px; right: 12px; z-index: 1; }
+.tienda-modal-img { width: 100%; height: 100%; min-height: 280px; object-fit: cover; }
+.tienda-modal-info { padding: 32px; display: flex; flex-direction: column; gap: 10px; }
+.tienda-modal-info h3 { margin: 0; }
+.tienda-precio { font-size: 24px; color: var(--rojo); }
+.tienda-etiqueta { margin: 8px 0 0; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--apagado, #999); }
+
+.tienda-tallas { display: flex; gap: 8px; flex-wrap: wrap; }
+.tienda-talla {
+  min-width: 44px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid #555;
+  background: transparent;
+  color: #fff;
+  cursor: pointer;
+}
+
+.tienda-talla.activa { border-color: var(--rojo); background: rgba(188, 8, 80, 0.2); }
+.tienda-talla:disabled { opacity: 0.35; cursor: not-allowed; text-decoration: line-through; }
+
+@media (max-width: 900px) {
+  .tienda-layout { grid-template-columns: 1fr; }
+  .tienda-carrito { position: static; }
+  .tienda-modal { grid-template-columns: 1fr; }
+}

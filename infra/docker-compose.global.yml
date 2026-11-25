@@ -1,0 +1,181 @@
+# Subsonic Festival completo: RabbitMQ + los 5 microservicios con sus bases de datos + el API Gateway.
+#
+#   docker compose -f docker-compose.global.yml up -d --build   (construye cada servicio desde su carpeta: ../ms-…, ../gateway)
+#   python servicios.py poblar                            (datos de prueba)
+#   docker compose -f docker-compose.global.yml down      (parar; añade -v para borrar los datos)
+#
+# El front-end usa solo el gateway: http://localhost:8000/api/v1/...
+# Puertos en tu equipo (los mismos que cada servicio por separado, así que no arranques los dos a la vez):
+#   gateway 8000
+#   ms-escaleta 8001 · ms-espacios 8002 · ms-usuarios 8003 · ms-tienda 8004 · ms-analitica 8005
+#   RabbitMQ 5672 / panel 15672 · bases de datos 5433-5436, 27018 · Redis 6380-6381
+include:
+  - docker-compose.yml   # RabbitMQ y la red "subsonic"
+
+x-api: &api
+  restart: unless-stopped
+  networks: [subsonic]
+
+x-postgres: &postgres
+  image: postgres:16-alpine
+  networks: [subsonic]
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+    interval: 5s
+    timeout: 3s
+    retries: 10
+
+x-rabbitmq-url: &rabbitmq_url amqp://subsonic:subsonic@rabbitmq:5672/%2F
+x-token-servicio: &token_servicio token-servicio-dev
+
+services:
+  # ── ms-escaleta ──────────────────────────────────────────
+  escaleta-db:
+    <<: *postgres
+    environment: {POSTGRES_USER: escaleta, POSTGRES_PASSWORD: escaleta, POSTGRES_DB: escaleta_db}
+    ports: ["5435:5432"]
+    volumes: [escaleta-datos:/var/lib/postgresql/data]
+
+  escaleta-redis:
+    image: redis:7-alpine
+    networks: [subsonic]
+    ports: ["6380:6379"]
+
+  ms-escaleta:
+    <<: *api
+    build: ../ms-escaleta
+    environment:
+      DATABASE_URL: postgresql+psycopg://escaleta:escaleta@escaleta-db:5432/escaleta_db
+      REDIS_URL: redis://escaleta-redis:6379/0
+      RABBITMQ_URL: *rabbitmq_url
+      YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}
+    ports: ["8001:8001"]
+    depends_on:
+      escaleta-db: {condition: service_healthy}
+      escaleta-redis: {condition: service_started}
+      rabbitmq: {condition: service_healthy}
+
+  # ── ms-espacios ──────────────────────────────────────────
+  espacios-db:
+    <<: *postgres
+    environment: {POSTGRES_USER: espacios, POSTGRES_PASSWORD: espacios, POSTGRES_DB: espacios_db}
+    ports: ["5436:5432"]
+    volumes: [espacios-datos:/var/lib/postgresql/data]
+
+  ms-espacios:
+    <<: *api
+    build: ../ms-espacios
+    environment:
+      DATABASE_URL: postgresql+psycopg://espacios:espacios@espacios-db:5432/espacios_db
+      RABBITMQ_URL: *rabbitmq_url
+      TOKEN_SERVICIO: *token_servicio
+    ports: ["8002:8002"]
+    depends_on:
+      espacios-db: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+
+  # ── ms-usuarios ──────────────────────────────────────────
+  usuarios-db:
+    <<: *postgres
+    environment: {POSTGRES_USER: usuarios, POSTGRES_PASSWORD: usuarios, POSTGRES_DB: usuarios_db}
+    ports: ["5433:5432"]
+    volumes: [usuarios-datos:/var/lib/postgresql/data]
+
+  ms-usuarios:
+    <<: *api
+    build: ../ms-usuarios
+    environment:
+      DATABASE_URL: postgresql+psycopg://usuarios:usuarios@usuarios-db:5432/usuarios_db
+      RABBITMQ_URL: *rabbitmq_url
+      # Dentro de la red "subsonic" los servicios se llaman por su nombre
+      ESPACIOS_URL: http://ms-espacios:8002
+      ESCALETA_URL: http://ms-escaleta:8001
+      TOKEN_SERVICIO: *token_servicio
+      QR_SECRETO: secreto-qr-dev
+      # Firebase real (asigna el rol en el token): deja firebase-claves.json en infra/secretos/ y pon en
+      # infra/.env la línea FIREBASE_CREDENCIALES=/secretos/firebase-claves.json. Sin ella, Firebase simulado.
+      FIREBASE_CREDENCIALES: ${FIREBASE_CREDENCIALES:-}
+    volumes: ["./secretos:/secretos:ro"]
+    ports: ["8003:8003"]
+    depends_on:
+      usuarios-db: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+      ms-espacios: {condition: service_started}
+
+  # ── ms-tienda ────────────────────────────────────────────
+  tienda-db:
+    <<: *postgres
+    environment: {POSTGRES_USER: tienda, POSTGRES_PASSWORD: tienda, POSTGRES_DB: tienda_db}
+    ports: ["5434:5432"]
+    volumes: [tienda-datos:/var/lib/postgresql/data]
+
+  ms-tienda:
+    <<: *api
+    build: ../ms-tienda
+    environment:
+      DATABASE_URL: postgresql+psycopg://tienda:tienda@tienda-db:5432/tienda_db
+      RABBITMQ_URL: *rabbitmq_url
+    ports: ["8004:8004"]
+    depends_on:
+      tienda-db: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+
+  # ── ms-analitica ─────────────────────────────────────────
+  analitica-mongo:
+    image: mongo:7
+    networks: [subsonic]
+    ports: ["27018:27017"]
+    volumes: [analitica-datos:/data/db]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  analitica-redis:
+    image: redis:7-alpine
+    networks: [subsonic]
+    ports: ["6381:6379"]
+
+  ms-analitica:
+    <<: *api
+    build: ../ms-analitica
+    environment:
+      MONGO_URL: mongodb://analitica-mongo:27017
+      MONGO_DB: analitica_db
+      REDIS_URL: redis://analitica-redis:6379/0
+      RABBITMQ_URL: *rabbitmq_url
+    ports: ["8005:8005"]
+    depends_on:
+      analitica-mongo: {condition: service_healthy}
+      analitica-redis: {condition: service_started}
+      rabbitmq: {condition: service_healthy}
+
+  # ── API Gateway ──────────────────────────────────────────
+  gateway:
+    <<: *api
+    build: ../gateway
+    environment:
+      ESCALETA_URL: http://ms-escaleta:8001
+      ESPACIOS_URL: http://ms-espacios:8002
+      USUARIOS_URL: http://ms-usuarios:8003
+      TIENDA_URL: http://ms-tienda:8004
+      ANALITICA_URL: http://ms-analitica:8005
+      # Solo en local: acepta también tokens dev:<uid>:<ROL> para probar sin iniciar sesión en Firebase
+      MODO_AUTENTICACION: desarrollo
+      FIREBASE_PROJECT_ID: subsonicfestivall3g1
+      CORS_ORIGENES: http://localhost:5173,http://127.0.0.1:5173
+    ports: ["8000:8000"]
+    depends_on:
+      ms-escaleta: {condition: service_started}
+      ms-espacios: {condition: service_started}
+      ms-usuarios: {condition: service_started}
+      ms-tienda: {condition: service_started}
+      ms-analitica: {condition: service_started}
+
+volumes:
+  escaleta-datos:
+  espacios-datos:
+  usuarios-datos:
+  tienda-datos:
+  analitica-datos:

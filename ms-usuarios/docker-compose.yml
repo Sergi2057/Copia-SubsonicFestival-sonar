@@ -1,0 +1,48 @@
+# Levanta ms-usuarios con su propia base de datos PostgreSQL (usuarios_db)
+#   docker compose up --build          -> API en http://localhost:8003/docs
+#   docker compose up -d usuarios-db   -> solo la BD, para ejecutar la API con python main.py
+# Para comprar entradas necesita ms-espacios arrancado (puerto 8002 de tu equipo).
+services:
+  usuarios-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: usuarios
+      POSTGRES_PASSWORD: usuarios
+      POSTGRES_DB: usuarios_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - usuarios-datos:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U usuarios -d usuarios_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  ms-usuarios:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg://usuarios:usuarios@usuarios-db:5432/usuarios_db
+      # Los demás servicios se alcanzan a través de los puertos publicados en tu equipo
+      ESPACIOS_URL: http://host.docker.internal:8002
+      ESCALETA_URL: http://host.docker.internal:8001
+      TOKEN_SERVICIO: token-servicio-dev
+      QR_SECRETO: secreto-qr-dev
+      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://subsonic:subsonic@rabbitmq:5672/%2F}
+    networks:
+      - default
+      - subsonic
+    ports:
+      - "8003:8003"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      usuarios-db:
+        condition: service_healthy
+
+volumes:
+  usuarios-datos:
+
+networks:
+  subsonic:
+    external: true

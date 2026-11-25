@@ -1,0 +1,50 @@
+# Levanta ms-escaleta con su base de datos PostgreSQL (escaleta_db) y su caché Redis
+#   docker compose up --build                          -> API en http://localhost:8001/docs
+#   docker compose up -d escaleta-db escaleta-redis    -> solo BD y caché, para ejecutar con python main.py
+services:
+  escaleta-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: escaleta
+      POSTGRES_PASSWORD: escaleta
+      POSTGRES_DB: escaleta_db
+    ports:
+      - "5435:5432"
+    volumes:
+      - escaleta-datos:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U escaleta -d escaleta_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  escaleta-redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+
+  ms-escaleta:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg://escaleta:escaleta@escaleta-db:5432/escaleta_db
+      REDIS_URL: redis://escaleta-redis:6379/0
+      YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}  # se lee del .env de esta carpeta (fuera de git)
+      RABBITMQ_URL: amqp://subsonic:subsonic@rabbitmq:5672/%2F
+    ports:
+      - "8001:8001"
+    networks:
+      - default
+      - subsonic
+    depends_on:
+      escaleta-db:
+        condition: service_healthy
+      escaleta-redis:
+        condition: service_started
+
+volumes:
+  escaleta-datos:
+
+# Red de infra (RabbitMQ). Arranca antes infra: cd ../infra && docker compose up -d
+networks:
+  subsonic:
+    external: true
