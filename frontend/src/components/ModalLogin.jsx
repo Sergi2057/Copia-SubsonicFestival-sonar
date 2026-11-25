@@ -27,7 +27,8 @@ export default function ModalLogin({ isOpen, onClose }) {
 
   // Comprobación básica de formato de email
   const emailEsValido = (valor) => {
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    // El dominio va por partes separadas por puntos, sin solapamientos: así la comprobación no hace backtracking
+    const emailRegex = /^[^\s@]+@[^\s@.]+(\.[^\s@.]+)+$/;
     return emailRegex.test(valor);
   };
 
