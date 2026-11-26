@@ -1,10 +1,10 @@
 name: SonarCloud
 
+# Se analiza cada rama en cada push (también las fix/sonar-… de las PR). El análisis en modo
+# pull request falla porque SonarCloud no consigue leer las PR de este repositorio.
 on:
   push:
-    branches: [ main ]
-  pull_request:
-    types: [ opened, synchronize, reopened ]
+    branches: [ "**" ]
   workflow_dispatch:
 
 jobs:
