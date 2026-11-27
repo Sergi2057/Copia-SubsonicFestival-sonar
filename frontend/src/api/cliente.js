@@ -5,7 +5,7 @@
 export const URL_API = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1';
 
 // La sesión (src/sesion/SesionContext.jsx) indica cómo obtener el token. forzar = pedir uno nuevo a Firebase.
-let obtenerToken = async () => null;
+let obtenerToken = async (_forzar) => null;
 
 export function configurarToken(funcion) {
   obtenerToken = funcion;
