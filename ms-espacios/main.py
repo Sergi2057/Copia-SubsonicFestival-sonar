@@ -37,10 +37,9 @@ async def lifespan(_: FastAPI):
         if hilo_consumidor is not None:
             hilo_consumidor.join(timeout=10)
         tarea.cancel()
-        try:
-            await tarea
-        except asyncio.CancelledError:
-            pass
+        # gather con return_exceptions recoge la cancelación de la tarea sin tragarse
+        # la de esta corrutina: si es el propio lifespan el que se cancela, se propaga
+        await asyncio.gather(tarea, return_exceptions=True)
 
 
 app = FastAPI(
