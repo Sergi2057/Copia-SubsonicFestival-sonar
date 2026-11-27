@@ -32,7 +32,7 @@ nav {
 }
 .logo {
   display: inline-flex;
-  align-items: left;
+  justify-content: flex-start;
   /* gap: 10px; */
   font-family: 'Bebas Neue', sans-serif;
   font-size: 26px;
