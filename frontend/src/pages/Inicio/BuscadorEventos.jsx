@@ -25,7 +25,7 @@ export default function BuscadorEventos() {
       .then(({ datos }) => {
         if (!cancelado) {
           setEventos(datos);
-          setPaises([...new Set(datos.map((evento) => evento.pais).filter(Boolean))].sort());
+          setPaises([...new Set(datos.map((evento) => evento.pais).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'es')));
         }
       })
       .catch((e) => {
